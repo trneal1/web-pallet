@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WebSocket JSON Drawing Viewer</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #111827;
+      color: white;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      height: 100vh;
+    }
+
+    header {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      padding: 0.75rem;
+      background: #1f2937;
+      border-bottom: 1px solid #374151;
+    }
+
+    input {
+      flex: 1;
+      padding: 0.5rem 0.65rem;
+      border-radius: 0.5rem;
+      border: 1px solid #4b5563;
+      background: #111827;
+      color: white;
+    }
+
+    button {
+      padding: 0.5rem 0.8rem;
+      border: 0;
+      border-radius: 0.5rem;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+      font-weight: 600;
+    }
+
+    #historyLimit {
+      flex: 0 0 4.5rem;
+    }
+
+    #status {
+      min-width: 8rem;
+      font-size: 0.9rem;
+      color: #d1d5db;
+    }
+
+    #historyStatus {
+      min-width: 4rem;
+      font-size: 0.9rem;
+      color: #d1d5db;
+    }
+
+    main {
+      overflow: hidden;
+      position: relative;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: white;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <input id="url" value="ws://localhost:8080" aria-label="WebSocket URL" />
+    <button id="connect">Connect</button>
+    <button id="clear">Clear</button>
+    <button id="historyPrev">Prev</button>
+    <button id="historyNext">Next</button>
+    <input id="historyLimit" type="number" min="0" max="100" value="10" aria-label="Remembered pages" />
+    <span id="historyStatus">0/0</span>
+    <span id="status">Disconnected</span>
+  </header>
+
+  <main>
+    <canvas id="canvas"></canvas>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const urlInput = document.getElementById("url");
+    const connectButton = document.getElementById("connect");
+    const clearButton = document.getElementById("clear");
+    const historyPrevButton = document.getElementById("historyPrev");
+    const historyNextButton = document.getElementById("historyNext");
+    const historyLimitInput = document.getElementById("historyLimit");
+    const historyStatusText = document.getElementById("historyStatus");
+    const statusText = document.getElementById("status");
+
+    let socket = null;
+    let reconnectTimer = null;
+    let shouldReconnect = false;
+    let reconnectAttempts = 0;
+    let drawingBuffer = [];
+    let displayBuffer = drawingBuffer;
+    let historyPages = [];
+    let historyIndex = null;
+    const maxReconnectDelay = 10000;
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function getCanvasStatus() {
+      const rect = canvas.getBoundingClientRect();
+      const mainRect = canvas.parentElement.getBoundingClientRect();
+      return {
+        type: "__pallet_status",
+        canvas_width: canvas.width,
+        canvas_height: canvas.height,
+        css_width: Math.round(rect.width),
+        css_height: Math.round(rect.height),
+        device_pixel_ratio: window.devicePixelRatio || 1,
+        max_css_width: Math.round(mainRect.width),
+        max_css_height: Math.round(mainRect.height),
+        screen_width: window.screen.width,
+        screen_height: window.screen.height,
+        screen_avail_width: window.screen.availWidth,
+        screen_avail_height: window.screen.availHeight
+      };
+    }
+
+    function sendCanvasStatus() {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify(getCanvasStatus()));
+    }
+
+    function clearCanvas(color = "white") {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = color;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
+    function cloneCommands(commands) {
+      return JSON.parse(JSON.stringify(commands));
+    }
+
+    function getHistoryLimit() {
+      const limit = Number.parseInt(historyLimitInput.value, 10);
+      return Number.isFinite(limit) ? Math.max(0, Math.min(100, limit)) : 0;
+    }
+
+    function hasDrawableContent(commands) {
+      return commands.some((command) => command.type !== "clear");
+    }
+
+    function trimHistory() {
+      const limit = getHistoryLimit();
+      if (historyPages.length > limit) {
+        const removed = historyPages.length - limit;
+        historyPages = historyPages.slice(removed);
+        if (historyIndex !== null) {
+          historyIndex = Math.max(0, historyIndex - removed);
+          if (historyIndex >= historyPages.length) {
+            historyIndex = historyPages.length ? historyPages.length - 1 : null;
+          }
+        }
+      }
+    }
+
+    function updateHistoryStatus() {
+      trimHistory();
+      historyPrevButton.disabled = historyPages.length === 0;
+      historyNextButton.disabled = historyPages.length === 0;
+      const page = historyIndex === null ? 0 : historyIndex + 1;
+      historyStatusText.textContent = `${page}/${historyPages.length}`;
+    }
+
+    function rememberCurrentPage() {
+      trimHistory();
+      if (getHistoryLimit() === 0 || !hasDrawableContent(drawingBuffer)) return;
+      historyPages.push(cloneCommands(drawingBuffer));
+      trimHistory();
+      updateHistoryStatus();
+    }
+
+    function saveLivePageToHistory() {
+      if (historyIndex !== null) {
+        returnToLivePage();
+      }
+      rememberCurrentPage();
+    }
+
+    function rememberCommand(command) {
+      if (command.type === "clear") {
+        rememberCurrentPage();
+        drawingBuffer = [command];
+        displayBuffer = drawingBuffer;
+        historyIndex = null;
+      } else {
+        drawingBuffer.push(command);
+        displayBuffer = drawingBuffer;
+        historyIndex = null;
+      }
+      updateHistoryStatus();
+    }
+
+    function redrawCommands(commands) {
+      for (const command of commands) {
+        drawCommand(command, false);
+      }
+    }
+
+    function redrawDisplayBuffer() {
+      redrawCommands(displayBuffer);
+    }
+
+    function showHistoryPage(index) {
+      if (!historyPages.length) return;
+      historyIndex = (index + historyPages.length) % historyPages.length;
+      displayBuffer = historyPages[historyIndex];
+      clearCanvas("white");
+      redrawCommands(displayBuffer);
+      updateHistoryStatus();
+    }
+
+    function returnToLivePage() {
+      if (historyIndex === null) return;
+      historyIndex = null;
+      displayBuffer = drawingBuffer;
+      clearCanvas("white");
+      redrawCommands(displayBuffer);
+      updateHistoryStatus();
+    }
+
+    function drawCommand(command, remember = true) {
+      if (command.type === "__pallet_client_disconnected") {
+        saveLivePageToHistory();
+        return;
+      }
+
+      if (remember && command.type !== "clear") {
+        returnToLivePage();
+      }
+
+      if (remember) {
+        rememberCommand(command);
+      }
+
+      switch (command.type) {
+        case "clear": {
+          clearCanvas(command.color || "white");
+          break;
+        }
+
+        case "line": {
+          ctx.beginPath();
+          ctx.moveTo(command.x1, command.y1);
+          ctx.lineTo(command.x2, command.y2);
+          ctx.strokeStyle = command.color || "black";
+          ctx.lineWidth = command.width || 1;
+          ctx.stroke();
+          break;
+        }
+
+        case "rect": {
+          ctx.beginPath();
+          ctx.rect(command.x, command.y, command.width, command.height);
+          if (command.fill) {
+            ctx.fillStyle = command.fill;
+            ctx.fill();
+          }
+          if (command.stroke !== false) {
+            ctx.strokeStyle = command.color || "black";
+            ctx.lineWidth = command.lineWidth || 1;
+            ctx.stroke();
+          }
+          break;
+        }
+
+        case "circle": {
+          ctx.beginPath();
+          ctx.arc(command.x, command.y, command.radius, 0, Math.PI * 2);
+          if (command.fill) {
+            ctx.fillStyle = command.fill;
+            ctx.fill();
+          }
+          if (command.stroke !== false) {
+            ctx.strokeStyle = command.color || "black";
+            ctx.lineWidth = command.lineWidth || 1;
+            ctx.stroke();
+          }
+          break;
+        }
+
+        case "text": {
+          ctx.fillStyle = command.color || "black";
+          ctx.font = command.font || "20px sans-serif";
+          ctx.fillText(command.text || "", command.x, command.y);
+          break;
+        }
+
+        case "path": {
+          if (!Array.isArray(command.points) || command.points.length < 2) return;
+          ctx.beginPath();
+          ctx.moveTo(command.points[0].x, command.points[0].y);
+          for (const point of command.points.slice(1)) {
+            ctx.lineTo(point.x, point.y);
+          }
+          ctx.strokeStyle = command.color || "black";
+          ctx.lineWidth = command.width || 1;
+          ctx.stroke();
+          break;
+        }
+
+        default:
+          console.warn("Unknown drawing command:", command);
+      }
+    }
+
+    function handleMessage(event) {
+      try {
+        const message = JSON.parse(event.data);
+
+        // Accept either one command or an array of commands.
+        const commands = Array.isArray(message) ? message : [message];
+        for (const command of commands) {
+          drawCommand(command);
+        }
+      } catch (error) {
+        console.error("Invalid JSON drawing message:", event.data, error);
+      }
+    }
+
+    function scheduleReconnect() {
+      if (!shouldReconnect || reconnectTimer) return;
+
+      const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
+      reconnectAttempts += 1;
+      statusText.textContent = `Reconnecting in ${Math.round(delay / 1000)}s...`;
+
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connectSocket();
+      }, delay);
+    }
+
+    function stopReconnect() {
+      shouldReconnect = false;
+      reconnectAttempts = 0;
+
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    }
+
+    function connectSocket() {
+      if (socket) return;
+
+      socket = new WebSocket(urlInput.value);
+      statusText.textContent = "Connecting...";
+      connectButton.textContent = "Disconnect";
+
+      socket.addEventListener("open", () => {
+        statusText.textContent = "Connected";
+        reconnectAttempts = 0;
+        sendCanvasStatus();
+      });
+
+      socket.addEventListener("message", handleMessage);
+
+      socket.addEventListener("close", () => {
+        socket = null;
+
+        if (shouldReconnect) {
+          scheduleReconnect();
+        } else {
+          statusText.textContent = "Disconnected";
+          connectButton.textContent = "Connect";
+        }
+      });
+
+      socket.addEventListener("error", () => {
+        statusText.textContent = shouldReconnect ? "Connection error. Retrying..." : "Connection error";
+      });
+    }
+
+    function connect() {
+      if (shouldReconnect) {
+        stopReconnect();
+
+        if (socket) {
+          socket.close();
+        } else {
+          statusText.textContent = "Disconnected";
+          connectButton.textContent = "Connect";
+        }
+
+        return;
+      }
+
+      shouldReconnect = true;
+      reconnectAttempts = 0;
+
+      if (socket) {
+        socket.close();
+        socket = null;
+      }
+
+      connectSocket();
+    }
+
+    connectButton.addEventListener("click", connect);
+    clearButton.addEventListener("click", () => drawCommand({ type: "clear", color: "white" }));
+    historyPrevButton.addEventListener("click", () => {
+      showHistoryPage(historyIndex === null ? historyPages.length - 1 : historyIndex - 1);
+    });
+    historyNextButton.addEventListener("click", () => {
+      showHistoryPage(historyIndex === null ? 0 : historyIndex + 1);
+    });
+    historyLimitInput.addEventListener("change", updateHistoryStatus);
+    window.addEventListener("resize", () => {
+      resizeCanvas();
+      redrawDisplayBuffer();
+      sendCanvasStatus();
+    });
+
+    resizeCanvas();
+    drawCommand({ type: "clear", color: "white" });
+    updateHistoryStatus();
+  </script>
+</body>
+</html>
+
+<!--
+Example JSON messages your WebSocket server can send:
+
+{ "type": "clear", "color": "white" }
+
+{ "type": "line", "x1": 20, "y1": 20, "x2": 300, "y2": 120, "color": "red", "width": 4 }
+
+{ "type": "rect", "x": 40, "y": 60, "width": 180, "height": 100, "fill": "#bfdbfe", "color": "#1d4ed8", "lineWidth": 3 }
+
+{ "type": "circle", "x": 350, "y": 160, "radius": 60, "fill": "gold", "color": "black", "lineWidth": 2 }
+
+{ "type": "text", "x": 60, "y": 240, "text": "Hello from WebSocket", "font": "28px sans-serif", "color": "black" }
+
+[
+  { "type": "clear", "color": "white" },
+  { "type": "line", "x1": 10, "y1": 10, "x2": 200, "y2": 200, "color": "green", "width": 5 },
+  { "type": "circle", "x": 200, "y": 200, "radius": 40, "fill": "orange" }
+]
+-->

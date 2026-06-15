@@ -1,0 +1,172 @@
+import asyncio
+import argparse
+import json
+import websockets
+
+web_clients = {}
+DEFAULT_LISTEN_HOST = "0.0.0.0"
+DEFAULT_WEBSOCKET_PORT = 8080
+DEFAULT_TCP_PORT = 9000
+DEFAULT_TCP_LIMIT = 16 * 1024 * 1024
+
+async def websocket_handler(websocket):
+    web_clients[websocket] = {}
+    print("Web app connected")
+
+    try:
+        async for message in websocket:
+            try:
+                command = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(command, dict) and command.get("type") == "__pallet_status":
+                web_clients[websocket] = {
+                    "canvas_width": command.get("canvas_width"),
+                    "canvas_height": command.get("canvas_height"),
+                    "css_width": command.get("css_width"),
+                    "css_height": command.get("css_height"),
+                    "device_pixel_ratio": command.get("device_pixel_ratio"),
+                    "max_css_width": command.get("max_css_width"),
+                    "max_css_height": command.get("max_css_height"),
+                    "screen_width": command.get("screen_width"),
+                    "screen_height": command.get("screen_height"),
+                    "screen_avail_width": command.get("screen_avail_width"),
+                    "screen_avail_height": command.get("screen_avail_height"),
+                }
+    finally:
+        web_clients.pop(websocket, None)
+        print("Web app disconnected")
+
+async def broadcast(command):
+    message = json.dumps(command)
+    dead = []
+
+    for ws in list(web_clients):
+        try:
+            await ws.send(message)
+        except Exception:
+            dead.append(ws)
+
+    for ws in dead:
+        web_clients.pop(ws, None)
+
+def browser_status():
+    clients = [
+        status
+        for status in web_clients.values()
+        if status.get("canvas_width") and status.get("canvas_height")
+    ]
+    status = {
+        "web_clients": len(web_clients),
+        "browsers": clients,
+    }
+    if clients:
+        status.update(clients[0])
+    return status
+
+async def tcp_handler(reader, writer):
+    addr = writer.get_extra_info("peername")
+    print("TCP client connected:", addr)
+
+    connected = len(web_clients) > 0
+
+    writer.write(json.dumps({
+        "status": "connected" if connected else "no_web_clients",
+        **browser_status(),
+    }).encode() + b"\n")
+    await writer.drain()
+
+    if not connected:
+        writer.close()
+        await writer.wait_closed()
+        return
+
+    try:
+        while True:
+            try:
+                line = await reader.readline()
+            except ValueError as e:
+                writer.write(json.dumps({
+                    "status": "error",
+                    "message": f"TCP message is too large for the bridge read limit: {e}"
+                }).encode() + b"\n")
+                await writer.drain()
+                break
+
+            if not line:
+                break
+
+            try:
+                command = json.loads(line.decode())
+
+                if isinstance(command, dict) and command.get("type") == "__pallet_get_status":
+                    writer.write(json.dumps({
+                        "status": "ok",
+                        **browser_status(),
+                    }).encode() + b"\n")
+                    await writer.drain()
+                    continue
+
+                if len(web_clients) == 0:
+                    writer.write(b'{"status":"no_web_clients"}\n')
+                    await writer.drain()
+                    continue
+
+                await broadcast(command)
+
+                writer.write(json.dumps({
+                    "status": "ok",
+                    "web_clients": len(web_clients)
+                }).encode() + b"\n")
+                await writer.drain()
+
+            except Exception as e:
+                writer.write(json.dumps({
+                    "status": "error",
+                    "message": str(e)
+                }).encode() + b"\n")
+                await writer.drain()
+    finally:
+        if len(web_clients) > 0:
+            await broadcast({
+                "type": "__pallet_client_disconnected",
+                "client": str(addr),
+            })
+        writer.close()
+        try:
+            await writer.wait_closed()
+        finally:
+            print("TCP client disconnected:", addr)
+
+async def main(host, websocket_port, tcp_port, tcp_limit):
+    ws_server = await websockets.serve(
+        websocket_handler,
+        host,
+        websocket_port
+    )
+
+    tcp_server = await asyncio.start_server(
+        tcp_handler,
+        host,
+        tcp_port,
+        limit=tcp_limit
+    )
+
+    print(f"WebSocket server listening on ws://{host}:{websocket_port}")
+    print(f"TCP server listening on {host}:{tcp_port} with {tcp_limit} byte read limit")
+
+    async with ws_server, tcp_server:
+        await asyncio.Future()
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Bridge TCP drawing clients to browser WebSocket clients")
+    parser.add_argument("--host", default=DEFAULT_LISTEN_HOST, help="IP/interface to listen on")
+    parser.add_argument("--websocket-port", type=int, default=DEFAULT_WEBSOCKET_PORT, help="browser WebSocket port")
+    parser.add_argument("--tcp-port", type=int, default=DEFAULT_TCP_PORT, help="Python drawing TCP port")
+    parser.add_argument("--tcp-limit", type=int, default=DEFAULT_TCP_LIMIT, help="maximum bytes per TCP JSON line")
+    return parser.parse_args()
+
+if __name__ == "__main__":
+    args = parse_args()
+    asyncio.run(main(args.host, args.websocket_port, args.tcp_port, args.tcp_limit))
