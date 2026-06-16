@@ -182,6 +182,12 @@ class Pallet:
     def clear(self, color: str = "white") -> dict[str, Any]:
         return self.command({"type": "clear", "color": color})
 
+    def save_page(self) -> dict[str, Any]:
+        return self.command({"type": "__pallet_save_page"})
+
+    def purge_saved_pages(self) -> dict[str, Any]:
+        return self.command({"type": "__pallet_purge_saved_pages"})
+
     def fill_screen(self, color: str = "white") -> dict[str, Any]:
         return self.clear(color)
 

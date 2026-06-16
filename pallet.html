@@ -200,6 +200,15 @@
       rememberCurrentPage();
     }
 
+    function purgeSavedPages() {
+      historyPages = [];
+      historyIndex = null;
+      displayBuffer = drawingBuffer;
+      clearCanvas("white");
+      redrawCommands(displayBuffer);
+      updateHistoryStatus();
+    }
+
     function rememberCommand(command) {
       if (command.type === "clear") {
         rememberCurrentPage();
@@ -244,7 +253,16 @@
 
     function drawCommand(command, remember = true) {
       if (command.type === "__pallet_client_disconnected") {
+        return;
+      }
+
+      if (command.type === "__pallet_save_page") {
         saveLivePageToHistory();
+        return;
+      }
+
+      if (command.type === "__pallet_purge_saved_pages") {
+        purgeSavedPages();
         return;
       }
 

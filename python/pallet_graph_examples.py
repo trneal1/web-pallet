@@ -352,6 +352,7 @@ def main() -> int:
             for index, (number, name, draw) in enumerate(to_run, 1):
                 print(f"[{index}/{len(to_run)}] Demo {number}: {name}")
                 draw(pallet)
+                pallet.save_page()
                 if index < len(to_run):
                     time.sleep(args.pause)
     except Exception as exc:
