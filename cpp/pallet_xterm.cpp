@@ -390,7 +390,7 @@ public:
         }
     }
 
-    void define_xterm_region(const Args& args, int pty_fd) {
+    std::string xterm_region_definition(const Args& args) const {
         std::ostringstream cmd;
         cmd << "{\"type\":\"terminal_xterm_define\""
             << ",\"id\":" << q(args.id)
@@ -406,7 +406,11 @@ public:
             << ",\"fontSize\":" << args.font_size
             << ",\"scrollback\":2000"
             << "}";
-        command(cmd.str(), pty_fd, args);
+        return cmd.str();
+    }
+
+    void define_xterm_region(const Args& args, int pty_fd) {
+        command(xterm_region_definition(args), pty_fd, args);
     }
 
     void subscribe_events(int pty_fd, const Args& args) {
@@ -584,6 +588,12 @@ private:
             const std::string response = read_line();
             XtermEvent event = parse_xterm_event(response);
             if (event.type != XtermEvent::Type::Ignore) {
+                if (event.type == XtermEvent::Type::BrowserConnected) {
+                    if (args.define) {
+                        send_all(xterm_region_definition(args) + "\n");
+                    }
+                    continue;
+                }
                 if (event.id != args.id || !matches_page(event, args)) {
                     continue;
                 }
