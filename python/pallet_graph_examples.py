@@ -11,6 +11,8 @@ Start the bridge and connect the browser first:
 Then open ``pallet.html`` and connect it to ``ws://localhost:8080``. Finally:
 
     python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 1
+    python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 18
+    python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 1 --page 2
     python python/pallet_graph_examples.py --bridge-host 192.168.1.50
 """
 from __future__ import annotations
@@ -292,6 +294,102 @@ def demo_positioned_graphs(pallet: Pallet) -> None:
     ).draw()
 
 
+def demo_terminal_regions(pallet: Pallet) -> None:
+    start_demo_page(pallet, "#E5E7EB")
+    gap = max(16, min(pallet.width, pallet.height) // 36)
+    left_w = max(320, (pallet.width - gap * 3) // 2)
+    right_w = max(320, pallet.width - left_w - gap * 3)
+    region_h = max(220, pallet.height - gap * 2)
+
+    log = pallet.terminal_region(
+        "system-log",
+        x=gap,
+        y=gap,
+        width=left_w,
+        height=region_h,
+        title="System Log",
+        background="#020617",
+        color="#CBD5E1",
+        border="#475569",
+    )
+    metrics = pallet.terminal_region(
+        "metrics",
+        x=gap * 2 + left_w,
+        y=gap,
+        width=right_w,
+        height=region_h,
+        title="Metrics",
+        background="#111827",
+        color="#E5E7EB",
+        border="#374151",
+    )
+
+    events = [
+        ("boot sequence started", "#93C5FD"),
+        ("loading graph renderer", "#CBD5E1"),
+        ("bridge connected on tcp/9000", "#86EFAC"),
+        ("browser status received", "#86EFAC"),
+        ("warming cache", "#FDE68A"),
+        ("ready", "#86EFAC"),
+    ]
+    for index, (message, color) in enumerate(events, 1):
+        log.writeln(f"{index:02d}: {message}", color=color)
+
+    for index in range(18):
+        cpu = 34 + round(18 * math.sin(index * 0.45))
+        mem = 410 + index * 9
+        metrics.writeln(f"sample={index:02d}  cpu={cpu:02d}%  mem={mem:04d} MB")
+
+    log.writeln("")
+    log.writeln("Long lines wrap inside the region without changing the rest of the canvas.", color="#C4B5FD")
+
+
+def demo_graph_with_terminal(pallet: Pallet) -> None:
+    start_demo_page(pallet, "#F8FAFC")
+    gap = max(16, min(pallet.width, pallet.height) // 40)
+    log_w = max(300, min(380, pallet.width // 3))
+    graph_w = max(360, pallet.width - log_w - gap * 3)
+    graph_h = max(260, pallet.height - gap * 2)
+
+    xs = [i * 0.4 for i in range(36)]
+    ys = [50 + 20 * math.sin(x) + 8 * math.sin(x * 2.7) for x in xs]
+    Graph(
+        pallet,
+        x=gap,
+        y=gap,
+        width=graph_w,
+        height=graph_h,
+        title="Sensor Stream",
+        x_label="sec",
+        y_label="value",
+        y_min=15,
+        y_max=85,
+    ).add_area_series(
+        xs,
+        ys,
+        color="#BAE6FD",
+        outline_color="#0284C7",
+        label="sensor",
+    ).draw()
+
+    log = pallet.terminal_region(
+        "stream-log",
+        x=gap * 2 + graph_w,
+        y=gap,
+        width=log_w,
+        height=graph_h,
+        title="Stream Log",
+        background="#0F172A",
+        color="#E2E8F0",
+        border="#334155",
+    )
+
+    for index, value in enumerate(ys[-20:], 1):
+        color = "#FCA5A5" if value > 70 else "#86EFAC" if value < 35 else "#E2E8F0"
+        label = "high" if value > 70 else "low" if value < 35 else "ok"
+        log.writeln(f"{index:02d}  value={value:05.2f}  {label}", color=color)
+
+
 DEMOS = [
     (1, "Sine / Cosine", demo_sine_cosine),
     (2, "Quadratic y=x^2", demo_quadratic),
@@ -310,6 +408,8 @@ DEMOS = [
     (15, "Area chart (network)", demo_area_stacked),
     (16, "Bar + line overlay", demo_bar_and_line),
     (17, "Positioned graphs", demo_positioned_graphs),
+    (18, "Terminal regions", demo_terminal_regions),
+    (19, "Graph + terminal log", demo_graph_with_terminal),
 ]
 
 
@@ -321,6 +421,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=None, help="alias for --bridge-port")
     parser.add_argument("--width", type=int, default=None, help="override browser-reported CSS drawing width")
     parser.add_argument("--height", type=int, default=None, help="override browser-reported CSS drawing height")
+    parser.add_argument("--page", default=None, help="pallet page to draw on")
     parser.add_argument("--timeout", type=float, default=5.0, help="bridge connection timeout in seconds")
     parser.add_argument("--pause", type=float, default=2.5, help="seconds between demos")
     parser.add_argument("--demo", type=int, default=None, help="run only demo N")
@@ -347,12 +448,12 @@ def main() -> int:
             width=args.width,
             height=args.height,
             timeout=args.timeout,
+            page=args.page,
         ) as pallet:
             print_pallet_size_info(pallet)
             for index, (number, name, draw) in enumerate(to_run, 1):
                 print(f"[{index}/{len(to_run)}] Demo {number}: {name}")
                 draw(pallet)
-                pallet.save_page()
                 if index < len(to_run):
                     time.sleep(args.pause)
     except Exception as exc:

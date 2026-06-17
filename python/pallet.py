@@ -20,6 +20,23 @@ DEFAULT_WIDTH = 960
 DEFAULT_HEIGHT = 540
 
 
+class TerminalRegion:
+    """Convenience handle for a scrolling text region on the browser pallet."""
+
+    def __init__(self, pallet: "Pallet", region_id: str) -> None:
+        self.pallet = pallet
+        self.id = region_id
+
+    def write(self, text: Any, *, color: Optional[str] = None) -> dict[str, Any]:
+        return self.pallet.write_terminal(self.id, text, color=color, newline=False)
+
+    def writeln(self, text: Any = "", *, color: Optional[str] = None) -> dict[str, Any]:
+        return self.pallet.write_terminal(self.id, text, color=color, newline=True)
+
+    def clear(self) -> dict[str, Any]:
+        return self.pallet.clear_terminal(self.id)
+
+
 class Pallet:
     """TCP drawing client for the browser pallet.
 
@@ -36,6 +53,7 @@ class Pallet:
         height: Optional[int] = None,
         timeout: float = 5.0,
         wait_for_ack: bool = True,
+        page: Optional[str | int] = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -45,6 +63,7 @@ class Pallet:
         self._auto_height = height is None
         self.timeout = timeout
         self.wait_for_ack = wait_for_ack
+        self.page = None if page is None else str(page)
         self.browser_status: dict[str, Any] = {}
         self.canvas_width: Optional[int] = None
         self.canvas_height: Optional[int] = None
@@ -136,6 +155,7 @@ class Pallet:
             self._sock = None
 
     def command(self, command: dict[str, Any]) -> dict[str, Any]:
+        command = self._apply_page(command)
         if self._batch is not None:
             self._batch.append(command)
             return {"status": "queued"}
@@ -153,9 +173,23 @@ class Pallet:
             self.connect()
 
         assert self._sock is not None
-        payload = json.dumps(list(commands), separators=(",", ":")).encode("utf-8") + b"\n"
+        payload = json.dumps([self._apply_page(command) for command in commands], separators=(",", ":")).encode("utf-8") + b"\n"
         self._sock.sendall(payload)
         return self._read_response() if self.wait_for_ack else {"status": "sent"}
+
+    def _apply_page(self, command: dict[str, Any]) -> dict[str, Any]:
+        if self.page is None or "page" in command or "palletPage" in command:
+            return command
+        return {**command, "page": self.page}
+
+    def set_page(self, page: Optional[str | int]) -> None:
+        self.page = None if page is None else str(page)
+
+    def show_page(self, page: Optional[str | int] = None) -> dict[str, Any]:
+        command: dict[str, Any] = {"type": "__pallet_show_page"}
+        if page is not None:
+            command["page"] = str(page)
+        return self.command(command)
 
     def begin_batch(self) -> None:
         if self._batch is not None:
@@ -182,11 +216,97 @@ class Pallet:
     def clear(self, color: str = "white") -> dict[str, Any]:
         return self.command({"type": "clear", "color": color})
 
-    def save_page(self) -> dict[str, Any]:
-        return self.command({"type": "__pallet_save_page"})
+    def terminal_region(
+        self,
+        region_id: str = "default",
+        *,
+        x: float = 0,
+        y: float = 0,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+        title: str = "",
+        background: str = "#020617",
+        color: str = "#E5E7EB",
+        border: Optional[str] = "#334155",
+        font: str = "14px ui-monospace, SFMono-Regular, Consolas, monospace",
+        padding: int = 8,
+        line_height: int = 18,
+        scrollback: int = 1000,
+    ) -> TerminalRegion:
+        self.define_terminal_region(
+            region_id,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            title=title,
+            background=background,
+            color=color,
+            border=border,
+            font=font,
+            padding=padding,
+            line_height=line_height,
+            scrollback=scrollback,
+        )
+        return TerminalRegion(self, region_id)
 
-    def purge_saved_pages(self) -> dict[str, Any]:
-        return self.command({"type": "__pallet_purge_saved_pages"})
+    def define_terminal_region(
+        self,
+        region_id: str = "default",
+        *,
+        x: float = 0,
+        y: float = 0,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+        title: str = "",
+        background: str = "#020617",
+        color: str = "#E5E7EB",
+        border: Optional[str] = "#334155",
+        font: str = "14px ui-monospace, SFMono-Regular, Consolas, monospace",
+        padding: int = 8,
+        line_height: int = 18,
+        scrollback: int = 1000,
+    ) -> dict[str, Any]:
+        return self.command({
+            "type": "terminal_define",
+            "id": str(region_id),
+            "x": round(x),
+            "y": round(y),
+            "width": round(width if width is not None else self.width - x),
+            "height": round(height if height is not None else self.height - y),
+            "title": title,
+            "background": background,
+            "color": color,
+            "border": False if border is None else border,
+            "font": font,
+            "padding": padding,
+            "lineHeight": line_height,
+            "scrollback": scrollback,
+        })
+
+    def write_terminal(
+        self,
+        region_id: str,
+        text: Any,
+        *,
+        color: Optional[str] = None,
+        newline: bool = False,
+    ) -> dict[str, Any]:
+        command = {
+            "type": "terminal_write",
+            "id": str(region_id),
+            "text": str(text),
+            "newline": bool(newline),
+        }
+        if color is not None:
+            command["color"] = color
+        return self.command(command)
+
+    def clear_terminal(self, region_id: str = "default") -> dict[str, Any]:
+        return self.command({
+            "type": "terminal_clear",
+            "id": str(region_id),
+        })
 
     def fill_screen(self, color: str = "white") -> dict[str, Any]:
         return self.clear(color)

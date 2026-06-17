@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>WebSocket JSON Drawing Viewer</title>
+  <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css" />
   <style>
     body {
       margin: 0;
@@ -24,13 +25,27 @@
       border-bottom: 1px solid #374151;
     }
 
-    input {
+    input,
+    select {
       flex: 1;
       padding: 0.5rem 0.65rem;
       border-radius: 0.5rem;
       border: 1px solid #4b5563;
       background: #111827;
       color: white;
+    }
+
+    #pageSelect {
+      flex: 0 0 9rem;
+    }
+
+    #deletePage {
+      background: #4b5563;
+    }
+
+    #deletePage:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
     }
 
     button {
@@ -43,18 +58,8 @@
       font-weight: 600;
     }
 
-    #historyLimit {
-      flex: 0 0 4.5rem;
-    }
-
     #status {
       min-width: 8rem;
-      font-size: 0.9rem;
-      color: #d1d5db;
-    }
-
-    #historyStatus {
-      min-width: 4rem;
       font-size: 0.9rem;
       color: #d1d5db;
     }
@@ -70,34 +75,55 @@
       height: 100%;
       background: white;
     }
+
+    #terminalLayer {
+      inset: 0;
+      pointer-events: none;
+      position: absolute;
+    }
+
+    .xterm-region {
+      background: #020617;
+      border: 1px solid #334155;
+      box-sizing: border-box;
+      overflow: hidden;
+      pointer-events: auto;
+      position: absolute;
+    }
+
+    .xterm-region .xterm {
+      height: 100%;
+    }
   </style>
 </head>
 <body>
   <header>
     <input id="url" value="ws://localhost:8080" aria-label="WebSocket URL" />
     <button id="connect">Connect</button>
+    <select id="pageSelect" aria-label="Viewed page">
+      <option value="">Start</option>
+    </select>
+    <button id="deletePage" disabled>Delete Page</button>
     <button id="clear">Clear</button>
-    <button id="historyPrev">Prev</button>
-    <button id="historyNext">Next</button>
-    <input id="historyLimit" type="number" min="0" max="100" value="10" aria-label="Remembered pages" />
-    <span id="historyStatus">0/0</span>
     <span id="status">Disconnected</span>
   </header>
 
   <main>
     <canvas id="canvas"></canvas>
+    <div id="terminalLayer"></div>
   </main>
 
+  <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+  <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
   <script>
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
+    const terminalLayer = document.getElementById("terminalLayer");
     const urlInput = document.getElementById("url");
     const connectButton = document.getElementById("connect");
+    const pageSelect = document.getElementById("pageSelect");
+    const deletePageButton = document.getElementById("deletePage");
     const clearButton = document.getElementById("clear");
-    const historyPrevButton = document.getElementById("historyPrev");
-    const historyNextButton = document.getElementById("historyNext");
-    const historyLimitInput = document.getElementById("historyLimit");
-    const historyStatusText = document.getElementById("historyStatus");
     const statusText = document.getElementById("status");
 
     let socket = null;
@@ -106,8 +132,19 @@
     let reconnectAttempts = 0;
     let drawingBuffer = [];
     let displayBuffer = drawingBuffer;
-    let historyPages = [];
-    let historyIndex = null;
+    let displayPageKey = null;
+    const pageBuffers = new Map();
+    const pageAliases = new Map([
+      ["default", null],
+      ["start", null],
+      ["live", null],
+      ["current", null],
+      ["main", null],
+      ["0", null]
+    ]);
+    let terminalRegions = new Map();
+    let activeTerminalId = null;
+    let xtermRegions = new Map();
     const maxReconnectDelay = 10000;
 
     function resizeCanvas() {
@@ -150,80 +187,93 @@
       ctx.restore();
     }
 
-    function cloneCommands(commands) {
-      return JSON.parse(JSON.stringify(commands));
+    function resetTerminalRegions() {
+      terminalRegions = new Map();
+      resetXtermRegions();
     }
 
-    function getHistoryLimit() {
-      const limit = Number.parseInt(historyLimitInput.value, 10);
-      return Number.isFinite(limit) ? Math.max(0, Math.min(100, limit)) : 0;
+    function resetXtermRegions() {
+      for (const region of xtermRegions.values()) {
+        region.dispose();
+      }
+      xtermRegions = new Map();
     }
 
-    function hasDrawableContent(commands) {
-      return commands.some((command) => command.type !== "clear");
+    function normalizePageKey(value) {
+      if (value === undefined || value === null || value === "") return null;
+      return String(value);
     }
 
-    function trimHistory() {
-      const limit = getHistoryLimit();
-      if (historyPages.length > limit) {
-        const removed = historyPages.length - limit;
-        historyPages = historyPages.slice(removed);
-        if (historyIndex !== null) {
-          historyIndex = Math.max(0, historyIndex - removed);
-          if (historyIndex >= historyPages.length) {
-            historyIndex = historyPages.length ? historyPages.length - 1 : null;
+    function getCommandPageKey(command) {
+      const key = normalizePageKey(command.page ?? command.palletPage);
+      return pageAliases.has(key) ? pageAliases.get(key) : key;
+    }
+
+    function getNamedPageBuffer(pageKey) {
+      if (!pageBuffers.has(pageKey)) {
+        pageBuffers.set(pageKey, []);
+        updatePageSelect();
+      }
+      return pageBuffers.get(pageKey);
+    }
+
+    function getPageBuffer(pageKey) {
+      if (pageKey === null) return drawingBuffer;
+      return getNamedPageBuffer(pageKey);
+    }
+
+    function isDisplayingPage(pageKey) {
+      if (pageKey === null) return displayPageKey === null && displayBuffer === drawingBuffer;
+      return displayBuffer === pageBuffers.get(pageKey);
+    }
+
+    function updatePageSelect() {
+      const selectedValue = displayPageKey === null ? "" : displayPageKey;
+      const existingValues = new Set(Array.from(pageSelect.options).map((option) => option.value));
+
+      for (const option of Array.from(pageSelect.options)) {
+        if (option.value !== "" && !pageBuffers.has(option.value)) {
+          option.remove();
+        }
+      }
+
+      for (const pageKey of pageBuffers.keys()) {
+        if (existingValues.has(pageKey)) continue;
+        const option = document.createElement("option");
+        option.value = pageKey;
+        option.textContent = `Page ${pageKey}`;
+        pageSelect.appendChild(option);
+      }
+
+      pageSelect.value = selectedValue;
+      deletePageButton.disabled = displayPageKey === null;
+    }
+
+    function rememberCommand(command, pageKey = null) {
+      const targetBuffer = getPageBuffer(pageKey);
+      const targetIsVisible = isDisplayingPage(pageKey);
+      if (command.type === "clear") {
+        if (pageKey === null) {
+          drawingBuffer = [command];
+          if (targetIsVisible) {
+            displayBuffer = drawingBuffer;
+            displayPageKey = null;
           }
+        } else {
+          targetBuffer.length = 0;
+          targetBuffer.push(command);
+        }
+      } else {
+        targetBuffer.push(command);
+        if (pageKey === null && targetIsVisible) {
+          displayBuffer = drawingBuffer;
+          displayPageKey = null;
         }
       }
     }
 
-    function updateHistoryStatus() {
-      trimHistory();
-      historyPrevButton.disabled = historyPages.length === 0;
-      historyNextButton.disabled = historyPages.length === 0;
-      const page = historyIndex === null ? 0 : historyIndex + 1;
-      historyStatusText.textContent = `${page}/${historyPages.length}`;
-    }
-
-    function rememberCurrentPage() {
-      trimHistory();
-      if (getHistoryLimit() === 0 || !hasDrawableContent(drawingBuffer)) return;
-      historyPages.push(cloneCommands(drawingBuffer));
-      trimHistory();
-      updateHistoryStatus();
-    }
-
-    function saveLivePageToHistory() {
-      if (historyIndex !== null) {
-        returnToLivePage();
-      }
-      rememberCurrentPage();
-    }
-
-    function purgeSavedPages() {
-      historyPages = [];
-      historyIndex = null;
-      displayBuffer = drawingBuffer;
-      clearCanvas("white");
-      redrawCommands(displayBuffer);
-      updateHistoryStatus();
-    }
-
-    function rememberCommand(command) {
-      if (command.type === "clear") {
-        rememberCurrentPage();
-        drawingBuffer = [command];
-        displayBuffer = drawingBuffer;
-        historyIndex = null;
-      } else {
-        drawingBuffer.push(command);
-        displayBuffer = drawingBuffer;
-        historyIndex = null;
-      }
-      updateHistoryStatus();
-    }
-
     function redrawCommands(commands) {
+      resetTerminalRegions();
       for (const command of commands) {
         drawCommand(command, false);
       }
@@ -233,50 +283,102 @@
       redrawCommands(displayBuffer);
     }
 
-    function showHistoryPage(index) {
-      if (!historyPages.length) return;
-      historyIndex = (index + historyPages.length) % historyPages.length;
-      displayBuffer = historyPages[historyIndex];
+    function returnToStartPage() {
+      displayBuffer = drawingBuffer;
+      displayPageKey = null;
       clearCanvas("white");
       redrawCommands(displayBuffer);
-      updateHistoryStatus();
+      updatePageSelect();
     }
 
-    function returnToLivePage() {
-      if (historyIndex === null) return;
-      historyIndex = null;
-      displayBuffer = drawingBuffer;
+    function deleteNamedPage(pageKey) {
+      pageKey = normalizePageKey(pageKey);
+      if (pageKey === null || !pageBuffers.has(pageKey)) return;
+
+      const deletedVisiblePage = displayPageKey === pageKey;
+      pageBuffers.delete(pageKey);
+      if (deletedVisiblePage) {
+        returnToStartPage();
+      } else {
+        updatePageSelect();
+      }
+    }
+
+    function showNamedPage(pageKey) {
+      displayBuffer = getPageBuffer(pageKey);
+      displayPageKey = pageKey;
       clearCanvas("white");
       redrawCommands(displayBuffer);
-      updateHistoryStatus();
+      updatePageSelect();
+    }
+
+    function showCommandPage(command) {
+      const pageKey = getCommandPageKey(command);
+      if (pageKey === null) {
+        returnToStartPage();
+      } else {
+        showNamedPage(pageKey);
+      }
     }
 
     function drawCommand(command, remember = true) {
+      const pageKey = getCommandPageKey(command);
       if (command.type === "__pallet_client_disconnected") {
         return;
       }
 
-      if (command.type === "__pallet_save_page") {
-        saveLivePageToHistory();
+      if (command.type === "__pallet_show_page" || command.type === "page_show") {
+        showCommandPage(command);
         return;
       }
 
-      if (command.type === "__pallet_purge_saved_pages") {
-        purgeSavedPages();
+      if (command.type === "__pallet_delete_page" || command.type === "page_delete") {
+        deleteNamedPage(pageKey);
         return;
       }
 
-      if (remember && command.type !== "clear") {
-        returnToLivePage();
-      }
-
+      const targetIsVisible = isDisplayingPage(pageKey);
       if (remember) {
-        rememberCommand(command);
+        rememberCommand(command, pageKey);
+        if (!targetIsVisible) {
+          return;
+        }
       }
 
       switch (command.type) {
         case "clear": {
+          resetTerminalRegions();
           clearCanvas(command.color || "white");
+          break;
+        }
+
+        case "terminal_define": {
+          defineTerminalRegion(command);
+          break;
+        }
+
+        case "terminal_write": {
+          writeTerminalRegion(command);
+          break;
+        }
+
+        case "terminal_clear": {
+          clearTerminalRegion(command);
+          break;
+        }
+
+        case "terminal_xterm_define": {
+          defineXtermRegion(command);
+          break;
+        }
+
+        case "terminal_xterm_output": {
+          writeXtermRegion(command);
+          break;
+        }
+
+        case "terminal_xterm_clear": {
+          clearXtermRegion(command);
           break;
         }
 
@@ -342,6 +444,392 @@
 
         default:
           console.warn("Unknown drawing command:", command);
+      }
+    }
+
+    function defineTerminalRegion(command) {
+      const id = String(command.id || "default");
+      const region = {
+        id,
+        x: Math.round(command.x || 0),
+        y: Math.round(command.y || 0),
+        width: Math.max(1, Math.round(command.width || 320)),
+        height: Math.max(1, Math.round(command.height || 160)),
+        background: command.background || "#020617",
+        color: command.color || "#E5E7EB",
+        border: command.border === false ? null : (command.border || "#334155"),
+        title: command.title || "",
+        titleColor: command.titleColor || command.color || "#E5E7EB",
+        font: command.font || "14px ui-monospace, SFMono-Regular, Consolas, monospace",
+        padding: Math.max(0, Math.round(command.padding ?? 8)),
+        lineHeight: Math.max(8, Math.round(command.lineHeight || 18)),
+        scrollback: Math.max(1, Math.round(command.scrollback || 1000)),
+        scrollOffset: 0,
+        scrollbarWidth: Math.max(8, Math.round(command.scrollbarWidth || 10)),
+        clearButtonWidth: Math.max(44, Math.round(command.clearButtonWidth || 48)),
+        interactive: command.interactive === true,
+        inputPrompt: command.inputPrompt || "$ ",
+        input: "",
+        lines: []
+      };
+
+      terminalRegions.set(id, region);
+      renderTerminalRegion(region);
+    }
+
+    function writeTerminalRegion(command) {
+      const id = String(command.id || "default");
+      const region = terminalRegions.get(id);
+      if (!region) {
+        console.warn("Unknown terminal region:", id);
+        return;
+      }
+
+      const text = String(command.text ?? "");
+      const color = command.color || region.color;
+      const chunks = text.split(/\r\n|\n|\r/);
+      chunks.forEach((chunk, index) => {
+        if (index > 0) {
+          region.lines.push({ text: "", color });
+        }
+
+        if (region.lines.length === 0) {
+          region.lines.push({ text: "", color });
+        }
+
+        if (chunk) {
+          appendWrappedTerminalText(region, chunk, color);
+        }
+      });
+
+      if (command.newline === true && !text.match(/(\r\n|\n|\r)$/)) {
+        region.lines.push({ text: "", color });
+      }
+
+      trimTerminalScrollback(region);
+      clampTerminalScroll(region);
+      renderTerminalRegion(region);
+    }
+
+    function appendWrappedTerminalText(region, text, color) {
+      ctx.save();
+      ctx.font = region.font;
+      const maxWidth = Math.max(1, region.width - region.padding * 2 - region.scrollbarWidth - 4);
+      let current = region.lines[region.lines.length - 1];
+      current.color = current.text ? current.color : color;
+
+      for (const char of text) {
+        const nextText = current.text + char;
+        if (current.text && ctx.measureText(nextText).width > maxWidth) {
+          current = { text: char, color };
+          region.lines.push(current);
+        } else {
+          current.text = nextText;
+        }
+      }
+      ctx.restore();
+    }
+
+    function trimTerminalScrollback(region) {
+      if (region.lines.length > region.scrollback) {
+        region.lines = region.lines.slice(region.lines.length - region.scrollback);
+      }
+    }
+
+    function getTerminalVisibleLineCount(region) {
+      const titleOffset = getTerminalHeaderOffset(region);
+      const inputOffset = region.interactive ? region.lineHeight + 2 : 0;
+      return Math.max(0, Math.floor((region.height - region.padding * 2 - titleOffset - inputOffset) / region.lineHeight));
+    }
+
+    function getTerminalHeaderOffset(region) {
+      return region.lineHeight + 4;
+    }
+
+    function clampTerminalScroll(region) {
+      const maxVisibleLines = getTerminalVisibleLineCount(region);
+      const maxOffset = Math.max(0, region.lines.length - maxVisibleLines);
+      region.scrollOffset = Math.max(0, Math.min(region.scrollOffset || 0, maxOffset));
+    }
+
+    function getTerminalAtPoint(x, y) {
+      const regions = Array.from(terminalRegions.values()).reverse();
+      return regions.find((region) =>
+        x >= region.x &&
+        x <= region.x + region.width &&
+        y >= region.y &&
+        y <= region.y + region.height
+      );
+    }
+
+    function scrollTerminalRegion(region, deltaY) {
+      const step = Math.max(1, Math.ceil(Math.abs(deltaY) / region.lineHeight));
+      region.scrollOffset += deltaY < 0 ? step : -step;
+      clampTerminalScroll(region);
+      renderTerminalRegion(region);
+    }
+
+    function sendTerminalInput(region) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const event = {
+        type: "__pallet_terminal_input",
+        id: region.id,
+        text: region.input
+      };
+      if (displayPageKey !== null) event.page = displayPageKey;
+      socket.send(JSON.stringify(event));
+    }
+
+    function getTerminalClearButtonBounds(region) {
+      const buttonHeight = Math.max(16, region.lineHeight);
+      return {
+        x: region.x + region.width - region.padding - region.scrollbarWidth - 8 - region.clearButtonWidth,
+        y: region.y + region.padding,
+        width: region.clearButtonWidth,
+        height: buttonHeight
+      };
+    }
+
+    function pointInRect(x, y, rect) {
+      return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+    }
+
+    function clearTerminalRegion(command) {
+      const id = String(command.id || "default");
+      const region = terminalRegions.get(id);
+      if (!region) return;
+      region.lines = [];
+      region.scrollOffset = 0;
+      renderTerminalRegion(region);
+    }
+
+    function renderTerminalRegion(region) {
+      ctx.save();
+      ctx.fillStyle = region.background;
+      ctx.fillRect(region.x, region.y, region.width, region.height);
+
+      if (region.border) {
+        ctx.strokeStyle = region.border;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(region.x + 0.5, region.y + 0.5, region.width - 1, region.height - 1);
+      }
+
+      ctx.font = region.font;
+      ctx.textBaseline = "top";
+      const titleOffset = getTerminalHeaderOffset(region);
+      const clearButton = getTerminalClearButtonBounds(region);
+
+      if (region.title) {
+        ctx.fillStyle = region.titleColor;
+        ctx.fillText(region.title, region.x + region.padding, region.y + region.padding);
+      }
+
+      renderTerminalClearButton(region, clearButton);
+
+      ctx.strokeStyle = region.border || "#334155";
+      ctx.beginPath();
+      ctx.moveTo(region.x + region.padding, region.y + region.padding + region.lineHeight + 1);
+      ctx.lineTo(Math.max(region.x + region.padding, clearButton.x - 8), region.y + region.padding + region.lineHeight + 1);
+      ctx.stroke();
+
+      const textX = region.x + region.padding;
+      const textY = region.y + region.padding + titleOffset;
+      const maxVisibleLines = getTerminalVisibleLineCount(region);
+      clampTerminalScroll(region);
+
+      const end = Math.max(0, region.lines.length - region.scrollOffset);
+      const start = Math.max(0, end - maxVisibleLines);
+      const visible = region.lines.slice(start, end);
+
+      for (let index = 0; index < visible.length; index += 1) {
+        const line = visible[index];
+        ctx.fillStyle = line.color || region.color;
+        ctx.fillText(line.text, textX, textY + index * region.lineHeight);
+      }
+
+      renderTerminalScrollbar(region, maxVisibleLines);
+      renderTerminalInput(region);
+
+      ctx.restore();
+    }
+
+    function renderTerminalClearButton(region, bounds) {
+      ctx.fillStyle = "rgba(15, 23, 42, 0.78)";
+      ctx.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
+      ctx.strokeStyle = region.border || "#334155";
+      ctx.strokeRect(bounds.x + 0.5, bounds.y + 0.5, bounds.width - 1, bounds.height - 1);
+      ctx.fillStyle = region.titleColor || region.color;
+      ctx.textAlign = "center";
+      ctx.fillText("Clear", bounds.x + bounds.width / 2, bounds.y + Math.max(1, (bounds.height - region.lineHeight) / 2));
+      ctx.textAlign = "start";
+    }
+
+    function renderTerminalInput(region) {
+      if (!region.interactive) return;
+
+      const y = region.y + region.height - region.padding - region.lineHeight;
+      const maxTextWidth = Math.max(1, region.width - region.padding * 2 - region.scrollbarWidth - 4);
+      const prompt = region.inputPrompt || "$ ";
+      const text = prompt + region.input + (activeTerminalId === region.id ? "_" : "");
+
+      ctx.strokeStyle = region.border || "#334155";
+      ctx.beginPath();
+      ctx.moveTo(region.x + region.padding, y - 3);
+      ctx.lineTo(region.x + region.width - region.padding - region.scrollbarWidth - 4, y - 3);
+      ctx.stroke();
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(region.x + region.padding, y, maxTextWidth, region.lineHeight);
+      ctx.clip();
+      ctx.fillStyle = activeTerminalId === region.id ? "#f8fafc" : region.color;
+      ctx.fillText(text, region.x + region.padding, y);
+      ctx.restore();
+    }
+
+    function renderTerminalScrollbar(region, maxVisibleLines) {
+      if (region.lines.length <= maxVisibleLines || maxVisibleLines <= 0) return;
+
+      const trackX = region.x + region.width - region.padding - region.scrollbarWidth;
+      const trackY = region.y + region.padding + getTerminalHeaderOffset(region);
+      const inputOffset = region.interactive ? region.lineHeight + 2 : 0;
+      const trackHeight = Math.max(1, region.height - region.padding * 2 - getTerminalHeaderOffset(region) - inputOffset);
+      const maxOffset = Math.max(1, region.lines.length - maxVisibleLines);
+      const thumbHeight = Math.max(18, Math.round(trackHeight * (maxVisibleLines / region.lines.length)));
+      const thumbRange = Math.max(0, trackHeight - thumbHeight);
+      const fromTop = maxOffset - region.scrollOffset;
+      const thumbY = trackY + Math.round((fromTop / maxOffset) * thumbRange);
+
+      ctx.fillStyle = "rgba(148, 163, 184, 0.22)";
+      ctx.fillRect(trackX, trackY, region.scrollbarWidth, trackHeight);
+      ctx.fillStyle = "rgba(226, 232, 240, 0.72)";
+      ctx.fillRect(trackX, thumbY, region.scrollbarWidth, thumbHeight);
+    }
+
+    function defineXtermRegion(command) {
+      if (!window.Terminal) {
+        console.error("xterm.js is not loaded; cannot create terminal_xterm region");
+        return;
+      }
+
+      const id = String(command.id || "default");
+      const existing = xtermRegions.get(id);
+      if (existing) {
+        existing.dispose();
+      }
+
+      const x = Math.round(command.x || 0);
+      const y = Math.round(command.y || 0);
+      const width = Math.max(1, Math.round(command.width || 640));
+      const height = Math.max(1, Math.round(command.height || 360));
+      const fontSize = Math.max(8, Math.round(command.fontSize || 14));
+      const lineHeight = Number(command.lineHeight || 1.15);
+      const charWidth = Math.max(6, Math.round(fontSize * 0.62));
+      const rowHeight = Math.max(10, Math.round(fontSize * lineHeight));
+      let cols = Math.max(2, Math.floor((width - 12) / charWidth));
+      let rows = Math.max(2, Math.floor((height - 12) / rowHeight));
+
+      const element = document.createElement("div");
+      element.className = "xterm-region";
+      element.style.left = `${x}px`;
+      element.style.top = `${y}px`;
+      element.style.width = `${width}px`;
+      element.style.height = `${height}px`;
+      element.style.background = command.background || "#020617";
+      element.style.borderColor = command.border === false ? "transparent" : (command.border || "#334155");
+      terminalLayer.appendChild(element);
+
+      const terminal = new window.Terminal({
+        cols,
+        rows,
+        cursorBlink: true,
+        convertEol: false,
+        fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+        fontSize,
+        lineHeight,
+        scrollback: Math.max(0, Math.round(command.scrollback || 1000)),
+        theme: {
+          background: command.background || "#020617",
+          foreground: command.color || "#E5E7EB",
+          cursor: command.cursor || "#f8fafc"
+        }
+      });
+      terminal.open(element);
+      let fitAddon = null;
+      if (window.FitAddon) {
+        fitAddon = new window.FitAddon.FitAddon();
+        terminal.loadAddon(fitAddon);
+        fitAddon.fit();
+        cols = terminal.cols;
+        rows = terminal.rows;
+      }
+      terminal.focus();
+
+      terminal.onData((data) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({
+          type: "__pallet_xterm_input",
+          id,
+          data,
+          ...(displayPageKey !== null ? { page: displayPageKey } : {})
+        }));
+      });
+
+      const region = {
+        id,
+        element,
+        terminal,
+        fitAddon,
+        x,
+        y,
+        width,
+        height,
+        cols,
+        rows,
+        dispose() {
+          terminal.dispose();
+          element.remove();
+        }
+      };
+      xtermRegions.set(id, region);
+      sendXtermResize(region);
+    }
+
+    function writeXtermRegion(command) {
+      const id = String(command.id || "default");
+      const region = xtermRegions.get(id);
+      if (!region) return;
+      region.terminal.write(String(command.data ?? ""));
+    }
+
+    function clearXtermRegion(command) {
+      const id = String(command.id || "default");
+      const region = xtermRegions.get(id);
+      if (!region) return;
+      region.terminal.clear();
+    }
+
+    function sendXtermResize(region) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const event = {
+        type: "__pallet_xterm_resize",
+        id: region.id,
+        cols: region.cols,
+        rows: region.rows
+      };
+      if (displayPageKey !== null) event.page = displayPageKey;
+      socket.send(JSON.stringify(event));
+    }
+
+    function fitXtermRegions() {
+      for (const region of xtermRegions.values()) {
+        if (!region.fitAddon) continue;
+        region.fitAddon.fit();
+        if (region.cols !== region.terminal.cols || region.rows !== region.terminal.rows) {
+          region.cols = region.terminal.cols;
+          region.rows = region.terminal.rows;
+          sendXtermResize(region);
+        }
       }
     }
 
@@ -439,23 +927,100 @@
     }
 
     connectButton.addEventListener("click", connect);
-    clearButton.addEventListener("click", () => drawCommand({ type: "clear", color: "white" }));
-    historyPrevButton.addEventListener("click", () => {
-      showHistoryPage(historyIndex === null ? historyPages.length - 1 : historyIndex - 1);
+    pageSelect.addEventListener("change", () => {
+      const pageKey = normalizePageKey(pageSelect.value);
+      if (pageKey === null) {
+        returnToStartPage();
+      } else {
+        showNamedPage(pageKey);
+      }
     });
-    historyNextButton.addEventListener("click", () => {
-      showHistoryPage(historyIndex === null ? 0 : historyIndex + 1);
+    deletePageButton.addEventListener("click", () => {
+      deleteNamedPage(displayPageKey);
     });
-    historyLimitInput.addEventListener("change", updateHistoryStatus);
+    clearButton.addEventListener("click", () => drawCommand({
+      type: "clear",
+      color: "white",
+      ...(displayPageKey !== null ? { page: displayPageKey } : {})
+    }));
+    canvas.addEventListener("wheel", (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const region = getTerminalAtPoint(event.clientX - rect.left, event.clientY - rect.top);
+      if (!region) return;
+
+      event.preventDefault();
+      scrollTerminalRegion(region, event.deltaY);
+    }, { passive: false });
+    canvas.addEventListener("click", (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const region = getTerminalAtPoint(x, y);
+      if (!region) {
+        activeTerminalId = null;
+        redrawDisplayBuffer();
+        return;
+      }
+
+      if (pointInRect(x, y, getTerminalClearButtonBounds(region))) {
+        drawCommand({
+          type: "terminal_clear",
+          id: region.id,
+          ...(displayPageKey !== null ? { page: displayPageKey } : {})
+        });
+        return;
+      }
+
+      if (region.interactive) {
+        activeTerminalId = region.id;
+        canvas.focus();
+        renderTerminalRegion(region);
+      }
+    });
+    canvas.tabIndex = 0;
+    canvas.addEventListener("keydown", (event) => {
+      if (!activeTerminalId) return;
+      const region = terminalRegions.get(activeTerminalId);
+      if (!region || !region.interactive) return;
+
+      if (event.key === "Enter") {
+        event.preventDefault();
+        sendTerminalInput(region);
+        region.input = "";
+        region.scrollOffset = 0;
+        renderTerminalRegion(region);
+        return;
+      }
+
+      if (event.key === "Backspace") {
+        event.preventDefault();
+        region.input = region.input.slice(0, -1);
+        renderTerminalRegion(region);
+        return;
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        region.input = "";
+        renderTerminalRegion(region);
+        return;
+      }
+
+      if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        region.input += event.key;
+        renderTerminalRegion(region);
+      }
+    });
     window.addEventListener("resize", () => {
       resizeCanvas();
       redrawDisplayBuffer();
+      fitXtermRegions();
       sendCanvasStatus();
     });
 
     resizeCanvas();
     drawCommand({ type: "clear", color: "white" });
-    updateHistoryStatus();
   </script>
 </body>
 </html>
@@ -472,6 +1037,9 @@ Example JSON messages your WebSocket server can send:
 { "type": "circle", "x": 350, "y": 160, "radius": 60, "fill": "gold", "color": "black", "lineWidth": 2 }
 
 { "type": "text", "x": 60, "y": 240, "text": "Hello from WebSocket", "font": "28px sans-serif", "color": "black" }
+
+{ "type": "terminal_define", "id": "log", "x": 24, "y": 24, "width": 440, "height": 220, "title": "Log" }
+{ "type": "terminal_write", "id": "log", "text": "Boot complete", "newline": true, "color": "#86efac" }
 
 [
   { "type": "clear", "color": "white" },

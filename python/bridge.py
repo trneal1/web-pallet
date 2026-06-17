@@ -4,6 +4,7 @@ import json
 import websockets
 
 web_clients = {}
+tcp_event_queues = set()
 DEFAULT_LISTEN_HOST = "0.0.0.0"
 DEFAULT_WEBSOCKET_PORT = 8080
 DEFAULT_TCP_PORT = 9000
@@ -12,6 +13,10 @@ DEFAULT_TCP_LIMIT = 16 * 1024 * 1024
 async def websocket_handler(websocket):
     web_clients[websocket] = {}
     print("Web app connected")
+    await publish_tcp_event({
+        "type": "__pallet_browser_connected",
+        **browser_status(),
+    })
 
     try:
         async for message in websocket:
@@ -34,9 +39,34 @@ async def websocket_handler(websocket):
                     "screen_avail_width": command.get("screen_avail_width"),
                     "screen_avail_height": command.get("screen_avail_height"),
                 }
+            elif (
+                isinstance(command, dict)
+                and command.get("type") in {
+                    "__pallet_terminal_input",
+                    "__pallet_xterm_input",
+                    "__pallet_xterm_resize",
+                }
+            ):
+                await publish_tcp_event(command)
     finally:
         web_clients.pop(websocket, None)
         print("Web app disconnected")
+
+async def publish_tcp_event(event):
+    dead = []
+    message = {
+        "status": "event",
+        "event": event,
+    }
+
+    for queue in list(tcp_event_queues):
+        try:
+            queue.put_nowait(message)
+        except Exception:
+            dead.append(queue)
+
+    for queue in dead:
+        tcp_event_queues.discard(queue)
 
 async def broadcast(command):
     message = json.dumps(command)
@@ -65,17 +95,78 @@ def browser_status():
         status.update(clients[0])
     return status
 
+async def write_json_line(writer, lock, payload):
+    async with lock:
+        writer.write(json.dumps(payload).encode() + b"\n")
+        await writer.drain()
+
+async def tcp_event_writer(writer, lock, event_queue):
+    while True:
+        event = await event_queue.get()
+        await write_json_line(writer, lock, event)
+
+async def tcp_reader(reader, writer, lock, addr, event_queue):
+    while True:
+        try:
+            line = await reader.readline()
+        except ValueError as e:
+            await write_json_line(writer, lock, {
+                "status": "error",
+                "message": f"TCP message is too large for the bridge read limit: {e}"
+            })
+            break
+
+        if not line:
+            break
+
+        try:
+            command = json.loads(line.decode())
+
+            if isinstance(command, dict) and command.get("type") == "__pallet_subscribe_events":
+                tcp_event_queues.add(event_queue)
+                await write_json_line(writer, lock, {
+                    "status": "ok",
+                    "events": "subscribed",
+                })
+                continue
+
+            if isinstance(command, dict) and command.get("type") == "__pallet_get_status":
+                await write_json_line(writer, lock, {
+                    "status": "ok",
+                    **browser_status(),
+                })
+                continue
+
+            if len(web_clients) == 0:
+                await write_json_line(writer, lock, {"status": "no_web_clients"})
+                continue
+
+            await broadcast(command)
+
+            await write_json_line(writer, lock, {
+                "status": "ok",
+                "web_clients": len(web_clients)
+            })
+
+        except Exception as e:
+            await write_json_line(writer, lock, {
+                "status": "error",
+                "message": str(e)
+            })
+
 async def tcp_handler(reader, writer):
     addr = writer.get_extra_info("peername")
     print("TCP client connected:", addr)
 
     connected = len(web_clients) > 0
+    write_lock = asyncio.Lock()
+    event_queue = asyncio.Queue()
+    event_task = None
 
-    writer.write(json.dumps({
+    await write_json_line(writer, write_lock, {
         "status": "connected" if connected else "no_web_clients",
         **browser_status(),
-    }).encode() + b"\n")
-    await writer.drain()
+    })
 
     if not connected:
         writer.close()
@@ -83,51 +174,12 @@ async def tcp_handler(reader, writer):
         return
 
     try:
-        while True:
-            try:
-                line = await reader.readline()
-            except ValueError as e:
-                writer.write(json.dumps({
-                    "status": "error",
-                    "message": f"TCP message is too large for the bridge read limit: {e}"
-                }).encode() + b"\n")
-                await writer.drain()
-                break
-
-            if not line:
-                break
-
-            try:
-                command = json.loads(line.decode())
-
-                if isinstance(command, dict) and command.get("type") == "__pallet_get_status":
-                    writer.write(json.dumps({
-                        "status": "ok",
-                        **browser_status(),
-                    }).encode() + b"\n")
-                    await writer.drain()
-                    continue
-
-                if len(web_clients) == 0:
-                    writer.write(b'{"status":"no_web_clients"}\n')
-                    await writer.drain()
-                    continue
-
-                await broadcast(command)
-
-                writer.write(json.dumps({
-                    "status": "ok",
-                    "web_clients": len(web_clients)
-                }).encode() + b"\n")
-                await writer.drain()
-
-            except Exception as e:
-                writer.write(json.dumps({
-                    "status": "error",
-                    "message": str(e)
-                }).encode() + b"\n")
-                await writer.drain()
+        event_task = asyncio.create_task(tcp_event_writer(writer, write_lock, event_queue))
+        await tcp_reader(reader, writer, write_lock, addr, event_queue)
     finally:
+        tcp_event_queues.discard(event_queue)
+        if event_task:
+            event_task.cancel()
         if len(web_clients) > 0:
             await broadcast({
                 "type": "__pallet_client_disconnected",
