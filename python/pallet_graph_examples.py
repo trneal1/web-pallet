@@ -12,6 +12,7 @@ Then open ``pallet.html`` and connect it to ``ws://localhost:8080``. Finally:
 
     python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 1
     python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 18
+    python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 20
     python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 1 --page 2
     python python/pallet_graph_examples.py --bridge-host 192.168.1.50
 """
@@ -24,7 +25,7 @@ import sys
 import time
 
 from pallet import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, Pallet
-from pallet_graph_lib import Graph
+from pallet_graph_lib import ArcGauge, BarGauge, CircularMeter, GaugeStyle, Graph
 
 
 def print_pallet_size_info(pallet: Pallet) -> None:
@@ -390,6 +391,79 @@ def demo_graph_with_terminal(pallet: Pallet) -> None:
         log.writeln(f"{index:02d}  value={value:05.2f}  {label}", color=color)
 
 
+def demo_gauges(pallet: Pallet) -> None:
+    start_demo_page(pallet, "#EEF2F7")
+    gap = max(14, min(pallet.width, pallet.height) // 42)
+    top_h = max(210, (pallet.height - gap * 3) // 2)
+    bottom_h = max(160, pallet.height - top_h - gap * 3)
+    cell_w = max(220, (pallet.width - gap * 3) // 2)
+    right_x = gap * 2 + cell_w
+    bottom_y = gap * 2 + top_h
+    thresholds = [(70, "#F59E0B"), (90, "#EF4444")]
+
+    cool = GaugeStyle(fill_color="#0EA5E9", value_color="#0F172A")
+    warm = GaugeStyle(fill_color="#22C55E", value_color="#0F172A")
+
+    ArcGauge(
+        pallet,
+        x=gap,
+        y=gap,
+        width=cell_w,
+        height=top_h,
+        title="Arc Gauge",
+        label="CPU load",
+        value=76,
+        units="%",
+        style=cool,
+        thresholds=thresholds,
+    ).draw()
+
+    CircularMeter(
+        pallet,
+        x=right_x,
+        y=gap,
+        width=cell_w,
+        height=top_h,
+        title="Circular Meter",
+        label="Storage",
+        value=63,
+        units="%",
+        style=warm,
+        thresholds=[(80, "#F59E0B"), (95, "#EF4444")],
+    ).draw()
+
+    BarGauge(
+        pallet,
+        x=gap,
+        y=bottom_y,
+        width=cell_w,
+        height=bottom_h,
+        title="Bar Gauge",
+        label="Tank level",
+        value=58,
+        units="%",
+        style=GaugeStyle(fill_color="#14B8A6"),
+        thresholds=[(75, "#F59E0B"), (92, "#EF4444")],
+    ).draw()
+
+    BarGauge(
+        pallet,
+        x=right_x,
+        y=bottom_y,
+        width=cell_w,
+        height=bottom_h,
+        title="Vertical Meter",
+        label="Pressure",
+        value=132,
+        minimum=0,
+        maximum=180,
+        units=" psi",
+        orientation="vertical",
+        style=GaugeStyle(fill_color="#8B5CF6"),
+        thresholds=[(120, "#F59E0B"), (155, "#EF4444")],
+    ).draw()
+
+
 DEMOS = [
     (1, "Sine / Cosine", demo_sine_cosine),
     (2, "Quadratic y=x^2", demo_quadratic),
@@ -410,6 +484,7 @@ DEMOS = [
     (17, "Positioned graphs", demo_positioned_graphs),
     (18, "Terminal regions", demo_terminal_regions),
     (19, "Graph + terminal log", demo_graph_with_terminal),
+    (20, "Gauges and meters", demo_gauges),
 ]
 
 

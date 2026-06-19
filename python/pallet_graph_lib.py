@@ -86,6 +86,25 @@ class GraphStyle:
     axis_title_size: int = 1
 
 
+@dataclass
+class GaugeStyle:
+    bg_color: str = "#F8FAFC"
+    panel_color: str = "#FFFFFF"
+    border_color: str = "#CBD5E1"
+    track_color: str = "#E2E8F0"
+    fill_color: str = "#06B6D4"
+    warning_color: str = "#F59E0B"
+    danger_color: str = "#EF4444"
+    tick_color: str = "#94A3B8"
+    needle_color: str = "#0F172A"
+    center_color: str = "#FFFFFF"
+    title_color: str = "#0F172A"
+    label_color: str = "#475569"
+    value_color: str = "#0F172A"
+    value_size: int = 2
+    label_size: int = 1
+
+
 def _safe_log10(value: float) -> float:
     return math.log10(value) if value > 0 else float("-inf")
 
@@ -160,6 +179,391 @@ def _bar_axis_padding(series: List[Series]) -> float:
         if x_values[index + 1] > x_values[index]
     ]
     return min(spacings) / 2 if spacings else 0.5
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def _value_fraction(value: float, minimum: float, maximum: float) -> float:
+    if minimum == maximum:
+        raise ValueError("Gauge minimum and maximum must differ")
+    return _clamp((value - minimum) / (maximum - minimum), 0.0, 1.0)
+
+
+def _format_value(value: float, units: str = "") -> str:
+    if value == int(value) and abs(value) < 10000:
+        text = str(int(value))
+    elif abs(value) >= 100:
+        text = f"{value:.0f}"
+    elif abs(value) >= 10:
+        text = f"{value:.1f}"
+    else:
+        text = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{text}{units}"
+
+
+def _angle_point(cx: float, cy: float, radius: float, angle_deg: float) -> Tuple[int, int]:
+    radians = math.radians(angle_deg)
+    return round(cx + math.cos(radians) * radius), round(cy + math.sin(radians) * radius)
+
+
+def _arc_points(cx: float, cy: float, radius: float, start_angle: float, end_angle: float, steps: int = 64) -> List[Tuple[int, int]]:
+    if steps <= 0:
+        return [_angle_point(cx, cy, radius, start_angle)]
+    return [
+        _angle_point(cx, cy, radius, start_angle + (end_angle - start_angle) * i / steps)
+        for i in range(steps + 1)
+    ]
+
+
+def _draw_arc(canvas, cx: float, cy: float, radius: float, start_angle: float, end_angle: float, color: str, width: float, *, line_cap: str = "round") -> None:
+    if hasattr(canvas, "arc"):
+        canvas.arc(cx, cy, radius, start_angle, end_angle, color, width, line_cap=line_cap)
+        return
+
+    sweep_radians = abs(math.radians(end_angle - start_angle))
+    steps = max(48, min(360, math.ceil(sweep_radians * max(1.0, radius) / 1.5)))
+    points = _arc_points(cx, cy, radius, start_angle, end_angle, steps)
+    try:
+        canvas.path(points, color, width, line_cap=line_cap, line_join="round")
+    except TypeError:
+        canvas.path(points, color, width)
+
+
+class BarGauge:
+    _CHAR_W = 8
+
+    def __init__(
+        self,
+        canvas,
+        *,
+        value: float,
+        minimum: float = 0.0,
+        maximum: float = 100.0,
+        title: str = "",
+        label: str = "",
+        units: str = "",
+        x: int = 0,
+        y: int = 0,
+        width: Optional[int] = None,
+        height: int = 96,
+        orientation: str = "horizontal",
+        style: Optional[GaugeStyle] = None,
+        thresholds: Optional[Sequence[Tuple[float, str]]] = None,
+        show_value: bool = True,
+        show_ticks: bool = True,
+    ) -> None:
+        if orientation not in ("horizontal", "vertical"):
+            raise ValueError("orientation must be 'horizontal' or 'vertical'")
+        self._canvas = canvas
+        self.value = value
+        self.minimum = minimum
+        self.maximum = maximum
+        self.title = title
+        self.label = label
+        self.units = units
+        self.x = round(x)
+        self.y = round(y)
+        self.width = round(width if width is not None else canvas.width - x)
+        self.height = round(height)
+        self.orientation = orientation
+        self.style = style or GaugeStyle()
+        self.thresholds = list(thresholds or [])
+        self.show_value = show_value
+        self.show_ticks = show_ticks
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("Gauge width and height must be positive")
+
+    def draw(self) -> None:
+        batch_started = False
+        if hasattr(self._canvas, "begin_batch") and hasattr(self._canvas, "end_batch"):
+            self._canvas.begin_batch()
+            batch_started = True
+        try:
+            self._draw()
+        finally:
+            if batch_started:
+                self._canvas.end_batch()
+
+    def _draw(self) -> None:
+        c = self._canvas
+        st = self.style
+        frac = _value_fraction(self.value, self.minimum, self.maximum)
+        c.fill_rect(self.x, self.y, self.width, self.height, st.panel_color)
+        c.rect(self.x, self.y, self.width, self.height, st.border_color)
+        if self.title:
+            c.text(self.x + 12, self.y + 8, self.title, color=st.title_color, size=1)
+
+        if self.orientation == "horizontal":
+            tx = self.x + 14
+            ty = self.y + max(34, self.height // 2 - 8)
+            tw = max(20, self.width - 28)
+            th = max(14, min(24, self.height - 58))
+            c.fill_rect(tx, ty, tw, th, st.track_color)
+            self._draw_threshold_bands(tx, ty, tw, th)
+            c.fill_rect(tx, ty, max(1, round(tw * frac)), th, self._value_color(frac))
+            c.rect(tx, ty, tw, th, st.border_color)
+            if self.show_ticks:
+                for i in range(6):
+                    px = tx + round(tw * i / 5)
+                    c.vline(px, ty + th + 4, 8, st.tick_color)
+            self._draw_text(tx, ty + th + 16, tw)
+        else:
+            tx = self.x + self.width // 2 - max(12, self.width // 8)
+            ty = self.y + 36
+            tw = max(18, min(34, self.width - 28))
+            th = max(30, self.height - 76)
+            c.fill_rect(tx, ty, tw, th, st.track_color)
+            self._draw_threshold_bands(tx, ty, tw, th)
+            fill_h = max(1, round(th * frac))
+            c.fill_rect(tx, ty + th - fill_h, tw, fill_h, self._value_color(frac))
+            c.rect(tx, ty, tw, th, st.border_color)
+            if self.show_ticks:
+                for i in range(6):
+                    py = ty + round(th * i / 5)
+                    c.hline(tx + tw + 4, py, 8, st.tick_color)
+            self._draw_text(self.x + 8, self.y + self.height - 32, self.width - 16)
+
+    def _draw_threshold_bands(self, x: int, y: int, width: int, height: int) -> None:
+        for threshold, color in self.thresholds:
+            t = _value_fraction(threshold, self.minimum, self.maximum)
+            if self.orientation == "horizontal":
+                bx = x + round(width * t)
+                self._canvas.fill_rect(bx, y, max(1, x + width - bx), height, color)
+            else:
+                by = y + round(height * (1.0 - t))
+                self._canvas.fill_rect(x, y, width, max(1, by - y), color)
+
+    def _value_color(self, frac: float) -> str:
+        color = self.style.fill_color
+        for threshold, threshold_color in self.thresholds:
+            if frac >= _value_fraction(threshold, self.minimum, self.maximum):
+                color = threshold_color
+        return color
+
+    def _draw_text(self, x: int, y: int, width: int) -> None:
+        st = self.style
+        if self.label:
+            self._canvas.text(x, y, self.label, color=st.label_color, size=st.label_size)
+        if self.show_value:
+            text = _format_value(self.value, self.units)
+            self._canvas.text(
+                x + max(0, width - len(text) * self._CHAR_W * st.value_size),
+                y,
+                text,
+                color=st.value_color,
+                size=st.value_size,
+            )
+
+
+class ArcGauge:
+    _CHAR_W = 8
+
+    def __init__(
+        self,
+        canvas,
+        *,
+        value: float,
+        minimum: float = 0.0,
+        maximum: float = 100.0,
+        title: str = "",
+        label: str = "",
+        units: str = "",
+        x: int = 0,
+        y: int = 0,
+        width: Optional[int] = None,
+        height: int = 220,
+        start_angle: float = 135.0,
+        end_angle: float = 405.0,
+        style: Optional[GaugeStyle] = None,
+        thresholds: Optional[Sequence[Tuple[float, str]]] = None,
+        show_value: bool = True,
+        show_ticks: bool = True,
+        needle: bool = True,
+    ) -> None:
+        self._canvas = canvas
+        self.value = value
+        self.minimum = minimum
+        self.maximum = maximum
+        self.title = title
+        self.label = label
+        self.units = units
+        self.x = round(x)
+        self.y = round(y)
+        self.width = round(width if width is not None else canvas.width - x)
+        self.height = round(height)
+        self.start_angle = start_angle
+        self.end_angle = end_angle
+        self.style = style or GaugeStyle()
+        self.thresholds = list(thresholds or [])
+        self.show_value = show_value
+        self.show_ticks = show_ticks
+        self.needle = needle
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("Gauge width and height must be positive")
+
+    def draw(self) -> None:
+        batch_started = False
+        if hasattr(self._canvas, "begin_batch") and hasattr(self._canvas, "end_batch"):
+            self._canvas.begin_batch()
+            batch_started = True
+        try:
+            self._draw()
+        finally:
+            if batch_started:
+                self._canvas.end_batch()
+
+    def _draw(self) -> None:
+        c = self._canvas
+        st = self.style
+        frac = _value_fraction(self.value, self.minimum, self.maximum)
+        cx = self.x + self.width / 2
+        cy = self.y + self.height - 34
+        radius = max(20, min(self.width * 0.42, self.height - 68))
+        sweep = self.end_angle - self.start_angle
+        value_angle = self.start_angle + sweep * frac
+
+        c.fill_rect(self.x, self.y, self.width, self.height, st.panel_color)
+        c.rect(self.x, self.y, self.width, self.height, st.border_color)
+        if self.title:
+            c.text(self.x + 12, self.y + 8, self.title, color=st.title_color, size=1)
+
+        _draw_arc(c, cx, cy, radius, self.start_angle, self.end_angle, st.track_color, 14, line_cap="butt")
+        self._draw_threshold_arcs(cx, cy, radius)
+        _draw_arc(c, cx, cy, radius, self.start_angle, value_angle, self._value_color(frac), 14)
+        if self.show_ticks:
+            self._draw_ticks(cx, cy, radius)
+        if self.needle:
+            nx, ny = _angle_point(cx, cy, radius - 16, value_angle)
+            c.line(cx, cy, nx, ny, st.needle_color, 3)
+            c.fill_circle(cx, cy, 7, st.needle_color)
+            c.fill_circle(cx, cy, 4, st.center_color)
+        self._draw_text(cx)
+
+    def _draw_threshold_arcs(self, cx: float, cy: float, radius: float) -> None:
+        sweep = self.end_angle - self.start_angle
+        for threshold, color in self.thresholds:
+            t = _value_fraction(threshold, self.minimum, self.maximum)
+            angle = self.start_angle + sweep * t
+            _draw_arc(self._canvas, cx, cy, radius, angle, self.end_angle, color, 14, line_cap="butt")
+
+    def _draw_ticks(self, cx: float, cy: float, radius: float) -> None:
+        for i in range(7):
+            angle = self.start_angle + (self.end_angle - self.start_angle) * i / 6
+            x0, y0 = _angle_point(cx, cy, radius - 6, angle)
+            x1, y1 = _angle_point(cx, cy, radius + 8, angle)
+            self._canvas.line(x0, y0, x1, y1, self.style.tick_color, 2)
+
+    def _value_color(self, frac: float) -> str:
+        color = self.style.fill_color
+        for threshold, threshold_color in self.thresholds:
+            if frac >= _value_fraction(threshold, self.minimum, self.maximum):
+                color = threshold_color
+        return color
+
+    def _draw_text(self, cx: float) -> None:
+        st = self.style
+        if self.show_value:
+            text = _format_value(self.value, self.units)
+            self._canvas.text(cx - len(text) * self._CHAR_W * st.value_size // 2, self.y + self.height - 58, text, color=st.value_color, size=st.value_size)
+        if self.label:
+            self._canvas.text(cx - len(self.label) * self._CHAR_W // 2, self.y + self.height - 30, self.label, color=st.label_color, size=st.label_size)
+
+
+class CircularMeter:
+    _CHAR_W = 8
+
+    def __init__(
+        self,
+        canvas,
+        *,
+        value: float,
+        minimum: float = 0.0,
+        maximum: float = 100.0,
+        title: str = "",
+        label: str = "",
+        units: str = "",
+        x: int = 0,
+        y: int = 0,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        style: Optional[GaugeStyle] = None,
+        thresholds: Optional[Sequence[Tuple[float, str]]] = None,
+        show_value: bool = True,
+        show_ticks: bool = True,
+        start_angle: float = -90.0,
+    ) -> None:
+        self._canvas = canvas
+        self.value = value
+        self.minimum = minimum
+        self.maximum = maximum
+        self.title = title
+        self.label = label
+        self.units = units
+        self.x = round(x)
+        self.y = round(y)
+        self.width = round(width if width is not None else canvas.width - x)
+        self.height = round(height if height is not None else self.width)
+        self.style = style or GaugeStyle()
+        self.thresholds = list(thresholds or [])
+        self.show_value = show_value
+        self.show_ticks = show_ticks
+        self.start_angle = start_angle
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("Meter width and height must be positive")
+
+    def draw(self) -> None:
+        batch_started = False
+        if hasattr(self._canvas, "begin_batch") and hasattr(self._canvas, "end_batch"):
+            self._canvas.begin_batch()
+            batch_started = True
+        try:
+            self._draw()
+        finally:
+            if batch_started:
+                self._canvas.end_batch()
+
+    def _draw(self) -> None:
+        c = self._canvas
+        st = self.style
+        frac = _value_fraction(self.value, self.minimum, self.maximum)
+        cx = self.x + self.width / 2
+        cy = self.y + self.height / 2 + (8 if self.title else 0)
+        radius = max(18, min(self.width, self.height - 18) * 0.33)
+        c.fill_rect(self.x, self.y, self.width, self.height, st.panel_color)
+        c.rect(self.x, self.y, self.width, self.height, st.border_color)
+        if self.title:
+            c.text(self.x + 12, self.y + 8, self.title, color=st.title_color, size=1)
+
+        _draw_arc(c, cx, cy, radius, self.start_angle, self.start_angle + 360, st.track_color, 14, line_cap="butt")
+        self._draw_threshold_arcs(cx, cy, radius)
+        _draw_arc(c, cx, cy, radius, self.start_angle, self.start_angle + 360 * frac, self._value_color(frac), 14)
+        c.fill_circle(cx, cy, max(4, radius - 18), st.panel_color)
+        if self.show_ticks:
+            for i in range(12):
+                angle = self.start_angle + i * 30
+                x0, y0 = _angle_point(cx, cy, radius - 5, angle)
+                x1, y1 = _angle_point(cx, cy, radius + 5, angle)
+                c.line(x0, y0, x1, y1, st.tick_color, 1)
+        if self.show_value:
+            text = _format_value(self.value, self.units)
+            c.text(cx - len(text) * self._CHAR_W * st.value_size // 2, cy - 18, text, color=st.value_color, size=st.value_size)
+        if self.label:
+            c.text(cx - len(self.label) * self._CHAR_W // 2, cy + 14, self.label, color=st.label_color, size=st.label_size)
+
+    def _draw_threshold_arcs(self, cx: float, cy: float, radius: float) -> None:
+        for threshold, color in self.thresholds:
+            t = _value_fraction(threshold, self.minimum, self.maximum)
+            start = self.start_angle + 360 * t
+            _draw_arc(self._canvas, cx, cy, radius, start, self.start_angle + 360, color, 14, line_cap="butt")
+
+    def _value_color(self, frac: float) -> str:
+        color = self.style.fill_color
+        for threshold, threshold_color in self.thresholds:
+            if frac >= _value_fraction(threshold, self.minimum, self.maximum):
+                color = threshold_color
+        return color
 
 
 class Graph:

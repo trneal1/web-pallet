@@ -372,6 +372,30 @@ class Pallet:
             "stroke": False,
         })
 
+    def arc(
+        self,
+        x: float,
+        y: float,
+        radius: float,
+        start_angle: float,
+        end_angle: float,
+        color: str = "black",
+        width: float = 1,
+        *,
+        line_cap: str = "round",
+    ) -> dict[str, Any]:
+        return self.command({
+            "type": "arc",
+            "x": round(x),
+            "y": round(y),
+            "radius": round(radius),
+            "startAngle": start_angle,
+            "endAngle": end_angle,
+            "color": color,
+            "width": width,
+            "lineCap": line_cap,
+        })
+
     def text(
         self,
         x: float,
@@ -392,10 +416,20 @@ class Pallet:
             "font": font or f"{px}px sans-serif",
         })
 
-    def path(self, points: Iterable[tuple[float, float]], color: str = "black", width: float = 1) -> dict[str, Any]:
+    def path(
+        self,
+        points: Iterable[tuple[float, float]],
+        color: str = "black",
+        width: float = 1,
+        *,
+        line_cap: str = "butt",
+        line_join: str = "round",
+    ) -> dict[str, Any]:
         return self.command({
             "type": "path",
             "points": [{"x": round(x), "y": round(y)} for x, y in points],
             "color": color,
             "width": width,
+            "lineCap": line_cap,
+            "lineJoin": line_join,
         })
