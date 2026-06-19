@@ -82,6 +82,100 @@
       position: absolute;
     }
 
+    #uiLayer {
+      inset: 0;
+      pointer-events: none;
+      position: absolute;
+    }
+
+    .pallet-grid {
+      box-sizing: border-box;
+      display: grid;
+      overflow: auto;
+      pointer-events: none;
+      position: absolute;
+    }
+
+    .pallet-card {
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid #CBD5E1;
+      border-radius: 0.75rem;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.10);
+      color: #0F172A;
+      min-width: 0;
+      overflow: auto;
+      padding: 0.9rem;
+      pointer-events: auto;
+    }
+
+    .pallet-card-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin: 0 0 0.75rem;
+    }
+
+    .pallet-control {
+      align-items: center;
+      display: grid;
+      gap: 0.4rem;
+      grid-template-columns: minmax(5rem, auto) minmax(0, 1fr);
+      margin: 0.55rem 0;
+      pointer-events: auto;
+    }
+
+    .pallet-control > label {
+      color: #475569;
+      font-size: 0.85rem;
+    }
+
+    .pallet-control input,
+    .pallet-control select,
+    .pallet-control button {
+      box-sizing: border-box;
+      min-width: 0;
+      width: 100%;
+    }
+
+    .pallet-control input[type="checkbox"] {
+      justify-self: start;
+      width: auto;
+    }
+
+    .pallet-table-wrap {
+      border: 1px solid #E2E8F0;
+      border-radius: 0.5rem;
+      max-width: 100%;
+      overflow: auto;
+    }
+
+    .pallet-table {
+      border-collapse: collapse;
+      color: #0F172A;
+      font-size: 0.86rem;
+      width: 100%;
+    }
+
+    .pallet-table th,
+    .pallet-table td {
+      border-bottom: 1px solid #E2E8F0;
+      padding: 0.48rem 0.6rem;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    .pallet-table th {
+      background: #F8FAFC;
+      color: #475569;
+      font-weight: 700;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    .pallet-table tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
     .xterm-region {
       background: #020617;
       border: 1px solid #334155;
@@ -110,6 +204,7 @@
 
   <main>
     <canvas id="canvas"></canvas>
+    <div id="uiLayer"></div>
     <div id="terminalLayer"></div>
   </main>
 
@@ -119,6 +214,7 @@
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
     const terminalLayer = document.getElementById("terminalLayer");
+    const uiLayer = document.getElementById("uiLayer");
     const urlInput = document.getElementById("url");
     const connectButton = document.getElementById("connect");
     const pageSelect = document.getElementById("pageSelect");
@@ -145,6 +241,10 @@
     let terminalRegions = new Map();
     let activeTerminalId = null;
     let xtermRegions = new Map();
+    let uiGrids = new Map();
+    let uiCards = new Map();
+    let uiControls = new Map();
+    let uiTables = new Map();
     const maxReconnectDelay = 10000;
 
     function resizeCanvas() {
@@ -190,6 +290,15 @@
     function resetTerminalRegions() {
       terminalRegions = new Map();
       resetXtermRegions();
+      resetUiLayer();
+    }
+
+    function resetUiLayer() {
+      uiLayer.replaceChildren();
+      uiGrids = new Map();
+      uiCards = new Map();
+      uiControls = new Map();
+      uiTables = new Map();
     }
 
     function resetXtermRegions() {
@@ -426,6 +535,36 @@
           break;
         }
 
+        case "ui_grid": {
+          defineUiGrid(command);
+          break;
+        }
+
+        case "ui_card": {
+          defineUiCard(command);
+          break;
+        }
+
+        case "ui_control": {
+          defineUiControl(command);
+          break;
+        }
+
+        case "ui_control_update": {
+          updateUiControl(command);
+          break;
+        }
+
+        case "ui_table": {
+          defineUiTable(command);
+          break;
+        }
+
+        case "ui_table_update": {
+          updateUiTable(command);
+          break;
+        }
+
         case "line": {
           ctx.beginPath();
           ctx.moveTo(command.x1, command.y1);
@@ -507,6 +646,286 @@
 
         default:
           console.warn("Unknown drawing command:", command);
+      }
+    }
+
+    function uiParent(cardId, gridId) {
+      if (cardId && uiCards.has(String(cardId))) return uiCards.get(String(cardId)).body;
+      if (gridId && uiGrids.has(String(gridId))) return uiGrids.get(String(gridId));
+      if (!uiGrids.has("default")) defineUiGrid({ id: "default" });
+      return uiGrids.get("default");
+    }
+
+    function defineUiGrid(command) {
+      const id = String(command.id || "default");
+      let element = uiGrids.get(id);
+      if (!element) {
+        element = document.createElement("section");
+        element.className = "pallet-grid";
+        element.dataset.palletGrid = id;
+        uiLayer.appendChild(element);
+        uiGrids.set(id, element);
+      }
+      const x = Math.round(command.x || 0);
+      const y = Math.round(command.y || 0);
+      element.style.left = `${x}px`;
+      element.style.top = `${y}px`;
+      element.style.width = command.width == null ? `calc(100% - ${x}px)` : `${Math.max(1, Math.round(command.width))}px`;
+      element.style.height = command.height == null ? `calc(100% - ${y}px)` : `${Math.max(1, Math.round(command.height))}px`;
+      element.style.gap = `${Math.max(0, Math.round(command.gap ?? 12))}px`;
+      element.style.padding = `${Math.max(0, Math.round(command.padding ?? 12))}px`;
+      element.style.background = command.background || "transparent";
+      const columns = Math.max(1, Math.round(command.columns || 2));
+      const minWidth = Math.max(80, Math.round(command.minColumnWidth || 240));
+      element.style.gridTemplateColumns = command.responsive === false
+        ? `repeat(${columns}, minmax(0, 1fr))`
+        : `repeat(auto-fit, minmax(min(100%, ${minWidth}px), 1fr))`;
+      element.style.alignContent = command.alignContent || "start";
+    }
+
+    function defineUiCard(command) {
+      const id = String(command.id || "card");
+      const existing = uiCards.get(id);
+      if (existing) existing.element.remove();
+      const element = document.createElement("article");
+      element.className = "pallet-card";
+      element.dataset.palletCard = id;
+      element.style.gridColumn = `span ${Math.max(1, Math.round(command.columnSpan || 1))}`;
+      element.style.gridRow = `span ${Math.max(1, Math.round(command.rowSpan || 1))}`;
+      if (command.background) element.style.background = command.background;
+      if (command.color) element.style.color = command.color;
+      if (command.border === false) element.style.border = "0";
+      else if (command.border) element.style.borderColor = command.border;
+      const title = document.createElement("h2");
+      title.className = "pallet-card-title";
+      title.textContent = String(command.title || "");
+      title.hidden = !title.textContent;
+      const body = document.createElement("div");
+      body.className = "pallet-card-body";
+      element.append(title, body);
+      uiParent(null, command.grid || "default").appendChild(element);
+      uiCards.set(id, { element, title, body });
+    }
+
+    function controlValue(input, kind) {
+      if (kind === "toggle") return input.checked;
+      if (kind === "slider" || kind === "number") return input.value === "" ? null : Number(input.value);
+      return input.value;
+    }
+
+    function sendUiEvent(id, eventName, value, details = {}) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const event = {
+        type: "__pallet_ui_event",
+        id: String(id),
+        event: eventName,
+        value,
+        ...details
+      };
+      if (displayPageKey !== null) event.page = displayPageKey;
+      socket.send(JSON.stringify(event));
+    }
+
+    function defineUiControl(command) {
+      const id = String(command.id || "control");
+      const existing = uiControls.get(id);
+      if (existing) existing.wrapper.remove();
+      const kind = String(command.kind || "button").toLowerCase();
+      const wrapper = document.createElement("div");
+      wrapper.className = `pallet-control pallet-control-${kind}`;
+      const label = document.createElement("label");
+      label.textContent = String(command.label || "");
+      label.htmlFor = `pallet-control-${id}`;
+      label.hidden = !label.textContent || kind === "button";
+      let input;
+      if (kind === "button") {
+        input = document.createElement("button");
+        input.type = "button";
+        input.textContent = String(command.label || command.text || id);
+      } else if (kind === "select") {
+        input = document.createElement("select");
+        for (const optionValue of (command.options || [])) {
+          const option = document.createElement("option");
+          if (optionValue && typeof optionValue === "object") {
+            option.value = String(optionValue.value ?? optionValue.label ?? "");
+            option.textContent = String(optionValue.label ?? optionValue.value ?? "");
+          } else {
+            option.value = String(optionValue);
+            option.textContent = String(optionValue);
+          }
+          input.appendChild(option);
+        }
+      } else {
+        input = document.createElement("input");
+        input.type = kind === "toggle" ? "checkbox" : kind === "slider" ? "range" : kind === "number" ? "number" : "text";
+      }
+      input.id = `pallet-control-${id}`;
+      input.disabled = command.disabled === true;
+      if (command.placeholder != null) input.placeholder = String(command.placeholder);
+      for (const name of ["min", "max", "step"]) {
+        if (command[name] != null) input[name] = command[name];
+      }
+      if (kind === "toggle") input.checked = command.value === true;
+      else if (kind !== "button" && command.value != null) input.value = String(command.value);
+      if (kind === "button") {
+        input.addEventListener("click", () => sendUiEvent(id, "click", command.value ?? true, { kind }));
+      } else {
+        input.addEventListener("change", () => sendUiEvent(id, "change", controlValue(input, kind), { kind }));
+        if (kind === "slider" && command.live === true) {
+          input.addEventListener("input", () => sendUiEvent(id, "input", controlValue(input, kind), { kind }));
+        }
+      }
+      wrapper.append(label, input);
+      uiParent(command.card, command.grid).appendChild(wrapper);
+      uiControls.set(id, { wrapper, label, input, kind });
+    }
+
+    function updateUiControl(command) {
+      const control = uiControls.get(String(command.id || ""));
+      if (!control) return;
+      if (command.label != null) {
+        control.label.textContent = String(command.label);
+        control.label.hidden = !control.label.textContent || control.kind === "button";
+        if (control.kind === "button") control.input.textContent = String(command.label);
+      }
+      if (command.disabled != null) control.input.disabled = command.disabled === true;
+      if (command.value !== undefined) {
+        if (control.kind === "toggle") control.input.checked = command.value === true;
+        else if (control.kind !== "button") control.input.value = command.value == null ? "" : String(command.value);
+      }
+      for (const name of ["min", "max", "step", "placeholder"]) {
+        if (command[name] != null) control.input[name] = command[name];
+      }
+    }
+
+    function normalizeTableColumns(columns) {
+      return (columns || []).map((column) => {
+        if (column && typeof column === "object") {
+          return { key: String(column.key ?? column.label ?? ""), label: String(column.label ?? column.key ?? ""), align: column.align || "left" };
+        }
+        return { key: String(column), label: String(column), align: "left" };
+      });
+    }
+
+    function defineUiTable(command) {
+      const id = String(command.id || "table");
+      const existing = uiTables.get(id);
+      if (existing) existing.root.remove();
+      const root = document.createElement("div");
+      root.style.pointerEvents = "auto";
+      const title = document.createElement("h3");
+      title.className = "pallet-card-title";
+      title.textContent = String(command.title || "");
+      title.hidden = !title.textContent;
+      root.appendChild(title);
+      let filter = null;
+      if (command.filterable === true) {
+        filter = document.createElement("input");
+        filter.type = "search";
+        filter.placeholder = String(command.filterPlaceholder || "Filter rows…");
+        filter.style.boxSizing = "border-box";
+        filter.style.marginBottom = "0.55rem";
+        filter.style.width = "100%";
+        root.appendChild(filter);
+      }
+      const wrap = document.createElement("div");
+      wrap.className = "pallet-table-wrap";
+      if (command.height != null) wrap.style.maxHeight = `${Math.max(60, Math.round(command.height))}px`;
+      const table = document.createElement("table");
+      table.className = "pallet-table";
+      table.append(document.createElement("thead"), document.createElement("tbody"));
+      wrap.appendChild(table);
+      root.appendChild(wrap);
+      uiParent(command.card, command.grid).appendChild(root);
+      const state = {
+        id,
+        root,
+        table,
+        columns: normalizeTableColumns(command.columns),
+        keyField: String(command.keyField || "id"),
+        rows: new Map(),
+        filter: "",
+        sortKey: null,
+        sortDirection: 1,
+        selectable: command.selectable === true,
+        maxRows: Math.max(0, Math.round(command.maxRows || 0))
+      };
+      uiTables.set(id, state);
+      setTableRows(state, command.rows || []);
+      if (filter) filter.addEventListener("input", () => { state.filter = filter.value.toLowerCase(); renderUiTable(state); });
+    }
+
+    function tableRowKey(state, row, fallback) {
+      return String(row?.[state.keyField] ?? fallback);
+    }
+
+    function setTableRows(state, rows) {
+      state.rows.clear();
+      (rows || []).forEach((row, index) => state.rows.set(tableRowKey(state, row, index), row || {}));
+      trimTableRows(state);
+      renderUiTable(state);
+    }
+
+    function trimTableRows(state) {
+      if (!state.maxRows) return;
+      while (state.rows.size > state.maxRows) state.rows.delete(state.rows.keys().next().value);
+    }
+
+    function updateUiTable(command) {
+      const state = uiTables.get(String(command.id || ""));
+      if (!state) return;
+      const action = String(command.action || "set");
+      if (action === "clear") state.rows.clear();
+      else if (action === "remove") {
+        for (const key of (command.keys || [command.key])) state.rows.delete(String(key));
+      } else if (action === "upsert") {
+        const rows = command.rows || (command.row ? [command.row] : []);
+        rows.forEach((row, index) => state.rows.set(tableRowKey(state, row, state.rows.size + index), row || {}));
+        trimTableRows(state);
+      } else {
+        setTableRows(state, command.rows || []);
+        return;
+      }
+      renderUiTable(state);
+    }
+
+    function renderUiTable(state) {
+      const thead = state.table.tHead;
+      const tbody = state.table.tBodies[0];
+      thead.replaceChildren();
+      tbody.replaceChildren();
+      const headerRow = document.createElement("tr");
+      for (const column of state.columns) {
+        const th = document.createElement("th");
+        th.textContent = column.label + (state.sortKey === column.key ? (state.sortDirection > 0 ? " ▲" : " ▼") : "");
+        th.style.textAlign = column.align;
+        th.style.cursor = "pointer";
+        th.addEventListener("click", () => {
+          if (state.sortKey === column.key) state.sortDirection *= -1;
+          else { state.sortKey = column.key; state.sortDirection = 1; }
+          renderUiTable(state);
+        });
+        headerRow.appendChild(th);
+      }
+      thead.appendChild(headerRow);
+      let rows = Array.from(state.rows.entries());
+      if (state.filter) rows = rows.filter(([, row]) => Object.values(row).some((value) => String(value ?? "").toLowerCase().includes(state.filter)));
+      if (state.sortKey) {
+        rows.sort((a, b) => String(a[1]?.[state.sortKey] ?? "").localeCompare(String(b[1]?.[state.sortKey] ?? ""), undefined, { numeric: true }) * state.sortDirection);
+      }
+      for (const [key, row] of rows) {
+        const tr = document.createElement("tr");
+        if (state.selectable) {
+          tr.style.cursor = "pointer";
+          tr.addEventListener("click", () => sendUiEvent(state.id, "row_click", row, { kind: "table", key }));
+        }
+        for (const column of state.columns) {
+          const td = document.createElement("td");
+          td.textContent = String(row?.[column.key] ?? "");
+          td.style.textAlign = column.align;
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
       }
     }
 

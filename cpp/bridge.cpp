@@ -715,7 +715,8 @@ private:
             web_clients_[fd].status = std::move(status);
         } else if (type == "__pallet_terminal_input" ||
                    type == "__pallet_xterm_input" ||
-                   type == "__pallet_xterm_resize") {
+                   type == "__pallet_xterm_resize" ||
+                   type == "__pallet_ui_event") {
             publish_tcp_event(message);
         }
     }

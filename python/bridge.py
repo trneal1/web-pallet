@@ -45,6 +45,7 @@ async def websocket_handler(websocket):
                     "__pallet_terminal_input",
                     "__pallet_xterm_input",
                     "__pallet_xterm_resize",
+                    "__pallet_ui_event",
                 }
             ):
                 await publish_tcp_event(command)

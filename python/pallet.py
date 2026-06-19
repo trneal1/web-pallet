@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import socket
+from collections import deque
 from contextlib import contextmanager
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 DEFAULT_BRIDGE_HOST = os.environ.get("PALLET_BRIDGE_HOST", "127.0.0.1")
 DEFAULT_BRIDGE_PORT = int(os.environ.get("PALLET_BRIDGE_PORT", "9000"))
 DEFAULT_WIDTH = 960
 DEFAULT_HEIGHT = 540
+_UNSET = object()
 
 
 class TerminalRegion:
@@ -36,6 +39,47 @@ class TerminalRegion:
 
     def clear(self) -> dict[str, Any]:
         return self.pallet.clear_terminal(self.id)
+
+
+class UIControl:
+    """Convenience handle for a browser-native interactive control."""
+
+    def __init__(self, pallet: "Pallet", control_id: str) -> None:
+        self.pallet = pallet
+        self.id = control_id
+
+    def set(self, value: Any = _UNSET, *, disabled: Optional[bool] = None, label: Optional[str] = None, **properties: Any) -> dict[str, Any]:
+        return self.pallet.update_control(self.id, value=value, disabled=disabled, label=label, **properties)
+
+    def on(self, callback: Callable[[dict[str, Any]], None]) -> "UIControl":
+        self.pallet.on_ui_event(self.id, callback)
+        return self
+
+
+class DataTable:
+    """Convenience handle for keyed live table updates."""
+
+    def __init__(self, pallet: "Pallet", table_id: str) -> None:
+        self.pallet = pallet
+        self.id = table_id
+
+    def set_rows(self, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        return self.pallet.update_table(self.id, "set", rows=rows)
+
+    def upsert(self, rows: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        items = [rows] if isinstance(rows, Mapping) else rows
+        return self.pallet.update_table(self.id, "upsert", rows=items)
+
+    def remove(self, keys: Any | Sequence[Any]) -> dict[str, Any]:
+        items = list(keys) if isinstance(keys, (list, tuple, set)) else [keys]
+        return self.pallet.update_table(self.id, "remove", keys=items)
+
+    def clear(self) -> dict[str, Any]:
+        return self.pallet.update_table(self.id, "clear")
+
+    def on_row_click(self, callback: Callable[[dict[str, Any]], None]) -> "DataTable":
+        self.pallet.on_ui_event(self.id, callback)
+        return self
 
 
 class Pallet:
@@ -81,6 +125,9 @@ class Pallet:
         self._file = None
         self._batch: Optional[list[dict[str, Any]]] = None
         self._metadata_stack: list[dict[str, Any]] = []
+        self._event_queue: deque[dict[str, Any]] = deque()
+        self._event_callbacks: dict[str, list[Callable[[dict[str, Any]], None]]] = {}
+        self._events_subscribed = False
 
     @classmethod
     def for_bridge(
@@ -155,6 +202,7 @@ class Pallet:
         if self._sock is not None:
             self._sock.close()
             self._sock = None
+        self._events_subscribed = False
 
     def command(self, command: dict[str, Any]) -> dict[str, Any]:
         command = self._apply_command_metadata(command)
@@ -246,12 +294,259 @@ class Pallet:
         return self.commands(batch)
 
     def _read_response(self) -> dict[str, Any]:
+        while True:
+            message = self._read_json_line()
+            if message.get("status") != "event":
+                return message
+            event = message.get("event")
+            if isinstance(event, dict):
+                self._event_queue.append(event)
+
+    def _read_json_line(self) -> dict[str, Any]:
         if self._file is None:
             return {}
         line = self._file.readline()
         if not line:
             raise ConnectionError("bridge closed the TCP connection")
         return json.loads(line)
+
+    def subscribe_events(self) -> dict[str, Any]:
+        if self._events_subscribed:
+            return {"status": "already_subscribed"}
+        response = self.command({"type": "__pallet_subscribe_events"})
+        self._events_subscribed = response.get("events") == "subscribed" or response.get("status") == "sent"
+        return response
+
+    def on_ui_event(self, control_id: str, callback: Callable[[dict[str, Any]], None]) -> None:
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._event_callbacks.setdefault(str(control_id), []).append(callback)
+        self.subscribe_events()
+
+    def _dispatch_event(self, event: dict[str, Any]) -> None:
+        event_id = str(event.get("id", ""))
+        for callback in [*self._event_callbacks.get(event_id, []), *self._event_callbacks.get("*", [])]:
+            callback(event)
+
+    def poll_event(self, timeout: Optional[float] = 0.0) -> Optional[dict[str, Any]]:
+        if self._event_queue:
+            event = self._event_queue.popleft()
+            self._dispatch_event(event)
+            return event
+        if not self._events_subscribed:
+            self.subscribe_events()
+        if self._sock is None:
+            return None
+        ready, _, _ = select.select([self._sock], [], [], timeout)
+        if not ready:
+            return None
+        while True:
+            message = self._read_json_line()
+            if message.get("status") != "event":
+                continue
+            event = message.get("event")
+            if isinstance(event, dict):
+                self._dispatch_event(event)
+                return event
+
+    def run_event_loop(self, *, timeout: Optional[float] = None, until: Optional[Callable[[], bool]] = None) -> None:
+        while until is None or not until():
+            self.poll_event(timeout)
+
+    def define_grid(
+        self,
+        grid_id: str = "default",
+        *,
+        x: float = 0,
+        y: float = 0,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+        columns: int = 2,
+        min_column_width: int = 240,
+        gap: int = 12,
+        padding: int = 12,
+        responsive: bool = True,
+        background: str = "transparent",
+    ) -> dict[str, Any]:
+        command: dict[str, Any] = {
+            "type": "ui_grid", "id": str(grid_id), "x": round(x), "y": round(y),
+            "columns": columns, "minColumnWidth": min_column_width, "gap": gap,
+            "padding": padding, "responsive": responsive, "background": background,
+        }
+        if width is not None:
+            command["width"] = round(width)
+        if height is not None:
+            command["height"] = round(height)
+        return self.command(command)
+
+    def define_card(
+        self,
+        card_id: str,
+        *,
+        grid: str = "default",
+        title: str = "",
+        column_span: int = 1,
+        row_span: int = 1,
+        background: Optional[str] = None,
+        color: Optional[str] = None,
+        border: Optional[str | bool] = None,
+    ) -> dict[str, Any]:
+        command: dict[str, Any] = {
+            "type": "ui_card", "id": str(card_id), "grid": str(grid), "title": title,
+            "columnSpan": column_span, "rowSpan": row_span,
+        }
+        if background is not None:
+            command["background"] = background
+        if color is not None:
+            command["color"] = color
+        if border is not None:
+            command["border"] = border
+        return self.command(command)
+
+    def control(
+        self,
+        control_id: str,
+        *,
+        kind: str = "button",
+        label: str = "",
+        value: Any = None,
+        card: Optional[str] = None,
+        grid: Optional[str] = None,
+        options: Optional[Sequence[Any]] = None,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+        step: Optional[float] = None,
+        placeholder: Optional[str] = None,
+        disabled: bool = False,
+        live: bool = False,
+        on_event: Optional[Callable[[dict[str, Any]], None]] = None,
+    ) -> UIControl:
+        self.define_control(
+            control_id, kind=kind, label=label, value=value, card=card, grid=grid,
+            options=options, minimum=minimum, maximum=maximum, step=step,
+            placeholder=placeholder, disabled=disabled, live=live,
+        )
+        handle = UIControl(self, str(control_id))
+        if on_event is not None:
+            handle.on(on_event)
+        return handle
+
+    def define_control(
+        self,
+        control_id: str,
+        *,
+        kind: str = "button",
+        label: str = "",
+        value: Any = None,
+        card: Optional[str] = None,
+        grid: Optional[str] = None,
+        options: Optional[Sequence[Any]] = None,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+        step: Optional[float] = None,
+        placeholder: Optional[str] = None,
+        disabled: bool = False,
+        live: bool = False,
+    ) -> dict[str, Any]:
+        if kind not in {"button", "toggle", "slider", "select", "text", "number"}:
+            raise ValueError("kind must be button, toggle, slider, select, text, or number")
+        command: dict[str, Any] = {
+            "type": "ui_control", "id": str(control_id), "kind": kind,
+            "label": label, "value": value, "disabled": disabled, "live": live,
+        }
+        if card is not None:
+            command["card"] = str(card)
+        if grid is not None:
+            command["grid"] = str(grid)
+        if options is not None:
+            command["options"] = list(options)
+        if minimum is not None:
+            command["min"] = minimum
+        if maximum is not None:
+            command["max"] = maximum
+        if step is not None:
+            command["step"] = step
+        if placeholder is not None:
+            command["placeholder"] = placeholder
+        return self.command(command)
+
+    def update_control(
+        self,
+        control_id: str,
+        *,
+        value: Any = _UNSET,
+        disabled: Optional[bool] = None,
+        label: Optional[str] = None,
+        **properties: Any,
+    ) -> dict[str, Any]:
+        command: dict[str, Any] = {"type": "ui_control_update", "id": str(control_id)}
+        if value is not _UNSET:
+            command["value"] = value
+        if disabled is not None:
+            command["disabled"] = disabled
+        if label is not None:
+            command["label"] = label
+        command.update(properties)
+        return self.command(command)
+
+    def table(
+        self,
+        table_id: str,
+        columns: Sequence[str | Mapping[str, Any]],
+        *,
+        rows: Sequence[Mapping[str, Any]] = (),
+        card: Optional[str] = None,
+        grid: Optional[str] = None,
+        title: str = "",
+        key_field: str = "id",
+        filterable: bool = True,
+        selectable: bool = False,
+        max_rows: int = 0,
+        height: Optional[int] = None,
+        on_row_click: Optional[Callable[[dict[str, Any]], None]] = None,
+    ) -> DataTable:
+        self.define_table(
+            table_id, columns, rows=rows, card=card, grid=grid, title=title,
+            key_field=key_field, filterable=filterable, selectable=selectable,
+            max_rows=max_rows, height=height,
+        )
+        handle = DataTable(self, str(table_id))
+        if on_row_click is not None:
+            handle.on_row_click(on_row_click)
+        return handle
+
+    def define_table(
+        self,
+        table_id: str,
+        columns: Sequence[str | Mapping[str, Any]],
+        *,
+        rows: Sequence[Mapping[str, Any]] = (),
+        card: Optional[str] = None,
+        grid: Optional[str] = None,
+        title: str = "",
+        key_field: str = "id",
+        filterable: bool = True,
+        selectable: bool = False,
+        max_rows: int = 0,
+        height: Optional[int] = None,
+    ) -> dict[str, Any]:
+        command: dict[str, Any] = {
+            "type": "ui_table", "id": str(table_id), "columns": list(columns),
+            "rows": list(rows), "title": title, "keyField": key_field,
+            "filterable": filterable, "selectable": selectable, "maxRows": max_rows,
+        }
+        if card is not None:
+            command["card"] = str(card)
+        if grid is not None:
+            command["grid"] = str(grid)
+        if height is not None:
+            command["height"] = height
+        return self.command(command)
+
+    def update_table(self, table_id: str, action: str = "set", **payload: Any) -> dict[str, Any]:
+        if action not in {"set", "upsert", "remove", "clear"}:
+            raise ValueError("action must be set, upsert, remove, or clear")
+        return self.command({"type": "ui_table_update", "id": str(table_id), "action": action, **payload})
 
     def clear(self, color: str = "white") -> dict[str, Any]:
         return self.command({"type": "clear", "color": color})
