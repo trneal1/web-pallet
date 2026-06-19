@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from contextlib import contextmanager
 from typing import Any, Iterable, Optional
 
 DEFAULT_BRIDGE_HOST = os.environ.get("PALLET_BRIDGE_HOST", "127.0.0.1")
@@ -79,6 +80,7 @@ class Pallet:
         self._sock: Optional[socket.socket] = None
         self._file = None
         self._batch: Optional[list[dict[str, Any]]] = None
+        self._metadata_stack: list[dict[str, Any]] = []
 
     @classmethod
     def for_bridge(
@@ -155,6 +157,7 @@ class Pallet:
             self._sock = None
 
     def command(self, command: dict[str, Any]) -> dict[str, Any]:
+        command = self._apply_command_metadata(command)
         command = self._apply_page(command)
         if self._batch is not None:
             self._batch.append(command)
@@ -173,9 +176,46 @@ class Pallet:
             self.connect()
 
         assert self._sock is not None
-        payload = json.dumps([self._apply_page(command) for command in commands], separators=(",", ":")).encode("utf-8") + b"\n"
+        payload = json.dumps(
+            [self._apply_page(self._apply_command_metadata(command)) for command in commands],
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n"
         self._sock.sendall(payload)
         return self._read_response() if self.wait_for_ack else {"status": "sent"}
+
+    def _apply_command_metadata(self, command: dict[str, Any]) -> dict[str, Any]:
+        if not self._metadata_stack:
+            return command
+        merged: dict[str, Any] = {}
+        for metadata in self._metadata_stack:
+            merged.update(metadata)
+        return {**merged, **command}
+
+    @contextmanager
+    def command_metadata(self, **metadata: Any):
+        self._metadata_stack.append({key: value for key, value in metadata.items() if value is not None})
+        try:
+            yield
+        finally:
+            self._metadata_stack.pop()
+
+    @contextmanager
+    def capture_commands(self):
+        if self._batch is not None:
+            raise RuntimeError("Cannot capture commands while a drawing batch is active")
+        captured: list[dict[str, Any]] = []
+        self._batch = captured
+        try:
+            yield captured
+        finally:
+            self._batch = None
+
+    def replace_group(self, group: str, commands: Iterable[dict[str, Any]]) -> dict[str, Any]:
+        return self.command({
+            "type": "__pallet_replace_group",
+            "group": str(group),
+            "commands": list(commands),
+        })
 
     def _apply_page(self, command: dict[str, Any]) -> dict[str, Any]:
         if self.page is None or "page" in command or "palletPage" in command:

@@ -13,6 +13,12 @@ Then open ``pallet.html`` and connect it to ``ws://localhost:8080``. Finally:
     python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 1
     python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 18
     python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 20
+    python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 21
+    python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 22
+    python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 23
+    python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 24
+    python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 25
+    python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 26
     python python/pallet_graph_examples.py --bridge-host 127.0.0.1 --demo 1 --page 2
     python python/pallet_graph_examples.py --bridge-host 192.168.1.50
 """
@@ -180,6 +186,33 @@ def demo_bar_negative(pallet: Pallet) -> None:
     g.draw()
 
 
+def demo_histogram(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    rng = random.Random(123)
+    samples = [
+        rng.gauss(0, 1.0) if index < 420 else rng.gauss(2.4, 0.55)
+        for index in range(520)
+    ]
+    g = Graph(
+        pallet,
+        title="Histogram",
+        x_label="value",
+        y_label="count",
+        x_min=-4,
+        x_max=5,
+        y_min=0,
+    )
+    g.add_histogram(
+        samples,
+        bins=18,
+        value_range=(-4, 5),
+        color="#8B5CF6",
+        outline_color="#5B21B6",
+        label="samples",
+    )
+    g.draw()
+
+
 def demo_area_basic(pallet: Pallet) -> None:
     start_demo_page(pallet)
     ts = [i * 0.5 for i in range(24)]
@@ -208,6 +241,135 @@ def demo_bar_and_line(pallet: Pallet) -> None:
     g = Graph(pallet, title="Rain & Temp", x_label="Month", y_label="mm", y2_label="degC", y_min=0, y_max=100, y2_min=0, y2_max=30)
     g.add_bar_series(months, rainfall, color="#3B82F6", outline_color="#1D4ED8", label="Rain", y_axis=1)
     g.add_series(months, temp, color="#EF4444", label="Temp", y_axis=2)
+    g.draw()
+
+
+def demo_update_point(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    xs = list(range(20))
+    ys = [40 + 12 * math.sin(x * 0.45) for x in xs]
+    g = Graph(
+        pallet,
+        title="Update one point",
+        x_label="sample",
+        y_label="value",
+        y_min=15,
+        y_max=70,
+        graph_id="update-point",
+    )
+    g.add_series(xs, ys, color="#06B6D4", label="live")
+    g.draw()
+
+    for step in range(36):
+        point = step % len(xs)
+        ys[point] = 40 + 22 * math.sin(step * 0.55)
+        g.set_point("live", point, y=ys[point])
+        time.sleep(0.08)
+
+
+def demo_update_series(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    xs = [i * 0.25 for i in range(40)]
+    baseline = [math.sin(x) for x in xs]
+    g = Graph(
+        pallet,
+        title="Replace whole series",
+        x_label="seconds",
+        y_label="amplitude",
+        y_min=-1.4,
+        y_max=1.4,
+        graph_id="update-series",
+    )
+    g.add_series(xs, baseline, color="#22C55E", label="wave")
+    g.add_series(xs, [0.35 * math.cos(x * 1.6) for x in xs], color="#F97316", label="reference", draw_markers=False)
+    g.draw()
+
+    for frame in range(32):
+        phase = frame * 0.22
+        updated = [math.sin(x + phase) * (0.75 + 0.25 * math.cos(phase)) for x in xs]
+        g.set_series("wave", xs, updated)
+        time.sleep(0.08)
+
+
+def demo_live_append(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    start_points = 40
+    end_points = 120
+    xs = list(range(start_points))
+    ys = [35 + 10 * math.sin(x * 0.24) for x in xs]
+    g = Graph(
+        pallet,
+        title="Live append",
+        x_label="sample",
+        y_label="value",
+        x_min=0,
+        x_max=end_points - 1,
+        y_min=10,
+        y_max=65,
+        graph_id="live-append",
+    )
+    g.add_series(xs, ys, color="#0EA5E9", label="sensor", draw_markers=False)
+    g.draw()
+
+    for step in range(start_points, end_points):
+        next_y = 35 + 14 * math.sin(step * 0.24) + 5 * math.sin(step * 0.9)
+        g.append_point("sensor", step, next_y, max_points=end_points, redraw_axes=False)
+        time.sleep(0.05)
+
+
+def demo_annotations(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    xs = [i * 0.25 for i in range(50)]
+    ys = [45 + 18 * math.sin(x) + 6 * math.sin(x * 2.8) for x in xs]
+    peak_index = max(range(len(ys)), key=lambda index: ys[index])
+    g = Graph(
+        pallet,
+        title="Annotations",
+        x_label="seconds",
+        y_label="value",
+        y_min=15,
+        y_max=75,
+    )
+    g.add_y_span(58, 75, fill="rgba(248, 113, 113, 0.20)", text="warning")
+    g.add_x_span(4.0, 5.5, fill="rgba(250, 204, 21, 0.22)", text="event")
+    g.add_series(xs, ys, color="#2563EB", label="signal")
+    g.add_hline(58, text="limit", color="#DC2626")
+    g.add_vline(5.0, text="trigger", color="#A16207")
+    g.add_point_label(xs[peak_index], ys[peak_index], "peak", color="#0F172A")
+    g.draw()
+
+
+def demo_heatmap(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    columns = 18
+    rows = 12
+    matrix = []
+    for y in range(rows):
+        row = []
+        for x in range(columns):
+            cx = (x - columns / 2) / columns
+            cy = (y - rows / 2) / rows
+            value = math.sin(x * 0.75) * math.cos(y * 0.65) + 2.4 * math.exp(-(cx * cx + cy * cy) * 18)
+            row.append(value)
+        matrix.append(row)
+
+    g = Graph(
+        pallet,
+        title="Heatmap / matrix",
+        x_label="column",
+        y_label="row",
+        x_min=0,
+        x_max=columns,
+        y_min=0,
+        y_max=rows,
+    )
+    g.add_heatmap(
+        matrix,
+        color_map=["#F8FAFC", "#67E8F9", "#2563EB", "#7F1D1D"],
+        label="intensity",
+    )
+    g.add_vline(columns / 2, text="mid", color="#111827")
+    g.add_hline(rows / 2, color="#111827")
     g.draw()
 
 
@@ -485,6 +647,12 @@ DEMOS = [
     (18, "Terminal regions", demo_terminal_regions),
     (19, "Graph + terminal log", demo_graph_with_terminal),
     (20, "Gauges and meters", demo_gauges),
+    (21, "Update one point", demo_update_point),
+    (22, "Replace whole series", demo_update_series),
+    (23, "Histogram", demo_histogram),
+    (24, "Live append helper", demo_live_append),
+    (25, "Annotations", demo_annotations),
+    (26, "Heatmap / matrix", demo_heatmap),
 ]
 
 

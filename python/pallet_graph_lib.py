@@ -26,6 +26,7 @@ The public API mirrors the TFT graph library closely:
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -41,6 +42,8 @@ DEFAULT_COLOURS = [
     "#14B8A6",
 ]
 
+DEFAULT_HEATMAP_COLOURS = ["#EFF6FF", "#38BDF8", "#2563EB", "#7C2D12"]
+
 
 @dataclass
 class Series:
@@ -55,16 +58,48 @@ class Series:
     chart_type: str = "line"
     outline_color: Optional[str] = None
     bar_gap: float = 0.18
+    z_data: Optional[List[List[float]]] = None
+    color_map: Optional[List[str]] = None
+    z_min: Optional[float] = None
+    z_max: Optional[float] = None
 
     def __post_init__(self) -> None:
-        if len(self.x_data) != len(self.y_data):
+        if self.chart_type == "heatmap":
+            if len(self.x_data) < 2 or len(self.y_data) < 2:
+                raise ValueError(f"Series {self.label!r}: heatmap edges must contain at least two values")
+            if any(self.x_data[index] >= self.x_data[index + 1] for index in range(len(self.x_data) - 1)):
+                raise ValueError(f"Series {self.label!r}: heatmap x edges must be strictly increasing")
+            if any(self.y_data[index] >= self.y_data[index + 1] for index in range(len(self.y_data) - 1)):
+                raise ValueError(f"Series {self.label!r}: heatmap y edges must be strictly increasing")
+            if self.z_data is None:
+                raise ValueError(f"Series {self.label!r}: heatmap z data must not be empty")
+            if len(self.z_data) != len(self.y_data) - 1:
+                raise ValueError(f"Series {self.label!r}: heatmap row count must match y bins")
+            if any(len(row) != len(self.x_data) - 1 for row in self.z_data):
+                raise ValueError(f"Series {self.label!r}: heatmap column count must match x bins")
+        elif len(self.x_data) != len(self.y_data):
             raise ValueError(f"Series {self.label!r}: x/y lengths differ")
         if not self.x_data:
             raise ValueError(f"Series {self.label!r}: data must not be empty")
         if self.y_axis not in (1, 2):
             raise ValueError("y_axis must be 1 or 2")
-        if self.chart_type not in ("line", "bar", "area"):
-            raise ValueError("chart_type must be 'line', 'bar', or 'area'")
+        if self.chart_type not in ("line", "bar", "area", "heatmap"):
+            raise ValueError("chart_type must be 'line', 'bar', 'area', or 'heatmap'")
+
+
+@dataclass
+class Annotation:
+    kind: str
+    x: Optional[float] = None
+    y: Optional[float] = None
+    x2: Optional[float] = None
+    y2: Optional[float] = None
+    text: str = ""
+    color: str = "#0F172A"
+    fill: Optional[str] = None
+    width: float = 2
+    size: int = 1
+    y_axis: int = 1
 
 
 @dataclass
@@ -596,6 +631,7 @@ class Graph:
         margin_bottom: Optional[int] = None,
         margin_top: Optional[int] = None,
         margin_right: Optional[int] = None,
+        graph_id: Optional[str] = None,
     ) -> None:
         self._canvas = canvas
         self.title = title
@@ -613,6 +649,9 @@ class Graph:
         self.log_y2 = log_y2
         self.style = style or GraphStyle()
         self._series: List[Series] = []
+        self._annotations: List[Annotation] = []
+        self.graph_id = graph_id or f"graph-{id(self):x}"
+        self._last_ranges: Optional[Tuple[float, float, float, float, float, float]] = None
 
         graph_width = width if width is not None else canvas.width - x
         graph_height = height if height is not None else canvas.height - y
@@ -674,6 +713,91 @@ class Graph:
         ))
         return self
 
+    def add_histogram(
+        self,
+        data: Sequence[float],
+        *,
+        bins: int | Sequence[float] = 10,
+        value_range: Optional[Tuple[float, float]] = None,
+        density: bool = False,
+        cumulative: bool = False,
+        color: Optional[str] = None,
+        outline_color: Optional[str] = None,
+        label: str = "",
+        bar_gap: float = 0.06,
+        y_axis: int = 1,
+    ) -> "Graph":
+        values = [float(value) for value in data]
+        if not values:
+            raise ValueError("Histogram data must not be empty")
+
+        if isinstance(bins, int):
+            if bins <= 0:
+                raise ValueError("Histogram bins must be positive")
+            lo = min(values) if value_range is None else float(value_range[0])
+            hi = max(values) if value_range is None else float(value_range[1])
+            if lo >= hi:
+                raise ValueError("Histogram value_range minimum must be less than maximum")
+            step = (hi - lo) / bins
+            edges = [lo + step * index for index in range(bins + 1)]
+        else:
+            edges = [float(edge) for edge in bins]
+            if len(edges) < 2:
+                raise ValueError("Histogram bin edges must contain at least two values")
+            if any(edges[index] >= edges[index + 1] for index in range(len(edges) - 1)):
+                raise ValueError("Histogram bin edges must be strictly increasing")
+
+        counts = [0.0 for _ in range(len(edges) - 1)]
+        first, last = edges[0], edges[-1]
+        for value in values:
+            if value < first or value > last:
+                continue
+            if value == last:
+                counts[-1] += 1
+                continue
+            index = self._histogram_bin_index(edges, value)
+            if index is not None:
+                counts[index] += 1
+
+        if cumulative:
+            running = 0.0
+            for index, count in enumerate(counts):
+                running += count
+                counts[index] = running
+
+        if density:
+            total = sum(counts)
+            if total > 0:
+                counts = [
+                    count / (total * (edges[index + 1] - edges[index]))
+                    for index, count in enumerate(counts)
+                ]
+
+        centers = [(edges[index] + edges[index + 1]) / 2 for index in range(len(edges) - 1)]
+        return self.add_bar_series(
+            centers,
+            counts,
+            color=color,
+            outline_color=outline_color,
+            label=label,
+            bar_gap=bar_gap,
+            y_axis=y_axis,
+        )
+
+    @staticmethod
+    def _histogram_bin_index(edges: Sequence[float], value: float) -> Optional[int]:
+        lo = 0
+        hi = len(edges) - 2
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if edges[mid] <= value < edges[mid + 1]:
+                return mid
+            if value < edges[mid]:
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        return None
+
     def add_area_series(
         self,
         x_data: Sequence[float],
@@ -693,6 +817,96 @@ class Graph:
         ))
         return self
 
+    def add_heatmap(
+        self,
+        z_data: Sequence[Sequence[float]],
+        *,
+        x_edges: Optional[Sequence[float]] = None,
+        y_edges: Optional[Sequence[float]] = None,
+        z_min: Optional[float] = None,
+        z_max: Optional[float] = None,
+        color_map: Optional[Sequence[str]] = None,
+        outline_color: Optional[str] = None,
+        label: str = "",
+        y_axis: int = 1,
+    ) -> "Graph":
+        matrix = [[float(value) for value in row] for row in z_data]
+        if not matrix or not matrix[0]:
+            raise ValueError("Heatmap z_data must not be empty")
+        columns = len(matrix[0])
+        if any(len(row) != columns for row in matrix):
+            raise ValueError("Heatmap rows must all have the same length")
+        colors = list(color_map or DEFAULT_HEATMAP_COLOURS)
+        if not colors:
+            raise ValueError("Heatmap color_map must not be empty")
+        xs = list(x_edges) if x_edges is not None else [float(index) for index in range(columns + 1)]
+        ys = list(y_edges) if y_edges is not None else [float(index) for index in range(len(matrix) + 1)]
+        self._series.append(Series(
+            xs,
+            ys,
+            colors[0],
+            label,
+            False,
+            False,
+            0,
+            y_axis,
+            "heatmap",
+            outline_color,
+            0.0,
+            matrix,
+            colors,
+            z_min,
+            z_max,
+        ))
+        return self
+
+    def add_vline(self, x: float, *, text: str = "", color: str = "#0F172A", width: float = 2, size: int = 1) -> "Graph":
+        self._annotations.append(Annotation("vline", x=x, text=text, color=color, width=width, size=size))
+        return self
+
+    def add_hline(
+        self,
+        y: float,
+        *,
+        text: str = "",
+        color: str = "#0F172A",
+        width: float = 2,
+        size: int = 1,
+        y_axis: int = 1,
+    ) -> "Graph":
+        self._annotations.append(Annotation("hline", y=y, text=text, color=color, width=width, size=size, y_axis=y_axis))
+        return self
+
+    def add_x_span(self, x_min: float, x_max: float, *, fill: str = "rgba(250, 204, 21, 0.22)", text: str = "") -> "Graph":
+        self._annotations.append(Annotation("xspan", x=x_min, x2=x_max, fill=fill, text=text))
+        return self
+
+    def add_y_span(
+        self,
+        y_min: float,
+        y_max: float,
+        *,
+        fill: str = "rgba(250, 204, 21, 0.22)",
+        text: str = "",
+        y_axis: int = 1,
+    ) -> "Graph":
+        self._annotations.append(Annotation("yspan", y=y_min, y2=y_max, fill=fill, text=text, y_axis=y_axis))
+        return self
+
+    def add_point_label(
+        self,
+        x: float,
+        y: float,
+        text: str,
+        *,
+        color: str = "#0F172A",
+        fill: Optional[str] = "#FFFFFF",
+        size: int = 1,
+        y_axis: int = 1,
+    ) -> "Graph":
+        self._annotations.append(Annotation("point", x=x, y=y, text=text, color=color, fill=fill, size=size, y_axis=y_axis))
+        return self
+
     def draw(self) -> None:
         if not self._series:
             raise ValueError("No series added")
@@ -710,6 +924,42 @@ class Graph:
 
     def _draw(self) -> None:
         st = self.style
+        x_min, x_max, y_min, y_max, y2_min, y2_max = self._calculate_ranges()
+        self._last_ranges = (x_min, x_max, y_min, y_max, y2_min, y2_max)
+        y2_series = [s for s in self._series if s.y_axis == 2]
+        bar_series = [s for s in self._series if s.chart_type == "bar"]
+
+        c = self._canvas
+        pw = self._px1 - self._px0 + 1
+        ph = self._py1 - self._py0 + 1
+        c.fill_rect(self._gx0, self._gy0, self._gw, self._gh, st.bg_color)
+        c.fill_rect(self._px0, self._py0, pw, ph, st.plot_bg_color)
+        self._draw_title(st, pw)
+        self._draw_grid(x_min, x_max, y_min, y_max, st)
+        self._draw_zero_lines(x_min, x_max, y_min, y_max, st)
+        self._draw_ticks(x_min, x_max, y_min, y_max, y2_min, y2_max, st, bool(y2_series))
+        self._draw_axis_labels(st, pw, bool(y2_series))
+
+        self._draw_span_annotations(x_min, x_max, y_min, y_max, y2_min, y2_max)
+
+        for chart_type in ("heatmap", "area", "bar", "line"):
+            for index, series in [(i, s) for i, s in enumerate(self._series) if s.chart_type == chart_type]:
+                ym, yM, log_y = (y2_min, y2_max, self.log_y2) if series.y_axis == 2 else (y_min, y_max, self.log_y)
+                with self._series_command_context(index):
+                    if chart_type == "heatmap":
+                        self._draw_heatmap(series, x_min, x_max, ym, yM)
+                    elif chart_type == "bar":
+                        self._draw_bar(series, x_min, x_max, ym, yM, log_y, bar_series.index(series), len(bar_series))
+                    elif chart_type == "area":
+                        self._draw_area(series, x_min, x_max, ym, yM, log_y)
+                    else:
+                        self._draw_line_series(series, x_min, x_max, ym, yM, log_y)
+
+        self._draw_line_annotations(x_min, x_max, y_min, y_max, y2_min, y2_max)
+        self._draw_axes(st, bool(y2_series), pw, ph)
+        self._draw_legend(st, bool(y2_series))
+
+    def _calculate_ranges(self) -> Tuple[float, float, float, float, float, float]:
         y1_series = [s for s in self._series if s.y_axis == 1]
         y2_series = [s for s in self._series if s.y_axis == 2]
         bar_series = [s for s in self._series if s.chart_type == "bar"]
@@ -726,30 +976,278 @@ class Graph:
                 x_max = max(x_max, max(all_x) + pad)
         y_min, y_max = _log_axis_range(all_y1, self.y_min, self.y_max) if self.log_y else _linear_axis_range(all_y1, self.y_min, self.y_max)
         y2_min, y2_max = _log_axis_range(all_y2, self.y2_min, self.y2_max) if self.log_y2 else _linear_axis_range(all_y2, self.y2_min, self.y2_max)
+        return x_min, x_max, y_min, y_max, y2_min, y2_max
 
-        c = self._canvas
-        pw = self._px1 - self._px0 + 1
-        ph = self._py1 - self._py0 + 1
-        c.fill_rect(self._gx0, self._gy0, self._gw, self._gh, st.bg_color)
-        c.fill_rect(self._px0, self._py0, pw, ph, st.plot_bg_color)
-        self._draw_title(st, pw)
-        self._draw_grid(x_min, x_max, y_min, y_max, st)
-        self._draw_zero_lines(x_min, x_max, y_min, y_max, st)
-        self._draw_ticks(x_min, x_max, y_min, y_max, y2_min, y2_max, st, bool(y2_series))
-        self._draw_axis_labels(st, pw, bool(y2_series))
+    def _series_command_context(self, index: int):
+        if hasattr(self._canvas, "command_metadata"):
+            return self._canvas.command_metadata(group=self._series_group(index))
+        return nullcontext()
 
-        for chart_type in ("area", "bar", "line"):
-            for series in [s for s in self._series if s.chart_type == chart_type]:
-                ym, yM, log_y = (y2_min, y2_max, self.log_y2) if series.y_axis == 2 else (y_min, y_max, self.log_y)
-                if chart_type == "bar":
-                    self._draw_bar(series, x_min, x_max, ym, yM, log_y, bar_series.index(series), len(bar_series))
-                elif chart_type == "area":
-                    self._draw_area(series, x_min, x_max, ym, yM, log_y)
+    def _series_group(self, index: int) -> str:
+        return f"pallet-graph:{self.graph_id}:series:{index}"
+
+    def _series_index(self, series: int | str | Series) -> int:
+        if isinstance(series, int):
+            if -len(self._series) <= series < len(self._series):
+                return series % len(self._series)
+            raise IndexError("series index out of range")
+        if isinstance(series, Series):
+            return self._series.index(series)
+        for index, item in enumerate(self._series):
+            if item.label == series:
+                return index
+        raise ValueError(f"Unknown series {series!r}")
+
+    def set_series(
+        self,
+        series: int | str | Series,
+        x_data: Sequence[float],
+        y_data: Sequence[float],
+        *,
+        redraw_axes: str | bool = "auto",
+    ) -> None:
+        index = self._series_index(series)
+        target = self._series[index]
+        old_x, old_y = target.x_data, target.y_data
+        target.x_data = list(x_data)
+        target.y_data = list(y_data)
+        try:
+            target.__post_init__()
+            self._replace_series_or_redraw(index, redraw_axes)
+        except Exception:
+            target.x_data, target.y_data = old_x, old_y
+            raise
+
+    def set_point(
+        self,
+        series: int | str | Series,
+        point_index: int,
+        *,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        redraw_axes: str | bool = "auto",
+    ) -> None:
+        index = self._series_index(series)
+        target = self._series[index]
+        if not -len(target.x_data) <= point_index < len(target.x_data):
+            raise IndexError("point index out of range")
+        point_index %= len(target.x_data)
+        old_x, old_y = target.x_data[point_index], target.y_data[point_index]
+        if x is not None:
+            target.x_data[point_index] = x
+        if y is not None:
+            target.y_data[point_index] = y
+        try:
+            target.__post_init__()
+            self._replace_series_or_redraw(index, redraw_axes)
+        except Exception:
+            target.x_data[point_index], target.y_data[point_index] = old_x, old_y
+            raise
+
+    def append_point(
+        self,
+        series: int | str | Series,
+        x: float,
+        y: float,
+        *,
+        max_points: Optional[int] = None,
+        redraw_axes: str | bool = "auto",
+    ) -> None:
+        index = self._series_index(series)
+        target = self._series[index]
+        old_x, old_y = target.x_data[:], target.y_data[:]
+        try:
+            target.x_data.append(x)
+            target.y_data.append(y)
+            self._trim_series_to_max_points(target, max_points)
+            target.__post_init__()
+            self._replace_series_or_redraw(index, redraw_axes)
+        except Exception:
+            target.x_data, target.y_data = old_x, old_y
+            raise
+
+    def append_points(
+        self,
+        series: int | str | Series,
+        x_data: Sequence[float],
+        y_data: Sequence[float],
+        *,
+        max_points: Optional[int] = None,
+        redraw_axes: str | bool = "auto",
+    ) -> None:
+        if len(x_data) != len(y_data):
+            raise ValueError("x/y lengths differ")
+        index = self._series_index(series)
+        target = self._series[index]
+        old_x, old_y = target.x_data[:], target.y_data[:]
+        try:
+            target.x_data.extend(x_data)
+            target.y_data.extend(y_data)
+            self._trim_series_to_max_points(target, max_points)
+            target.__post_init__()
+            self._replace_series_or_redraw(index, redraw_axes)
+        except Exception:
+            target.x_data, target.y_data = old_x, old_y
+            raise
+
+    def shift_series(
+        self,
+        series: int | str | Series,
+        *,
+        dx: float = 0.0,
+        dy: float = 0.0,
+        redraw_axes: str | bool = "auto",
+    ) -> None:
+        index = self._series_index(series)
+        target = self._series[index]
+        old_x, old_y = target.x_data[:], target.y_data[:]
+        target.x_data = [value + dx for value in target.x_data]
+        target.y_data = [value + dy for value in target.y_data]
+        try:
+            target.__post_init__()
+            self._replace_series_or_redraw(index, redraw_axes)
+        except Exception:
+            target.x_data, target.y_data = old_x, old_y
+            raise
+
+    def trim_series(
+        self,
+        series: int | str | Series,
+        max_points: int,
+        *,
+        redraw_axes: str | bool = "auto",
+    ) -> None:
+        index = self._series_index(series)
+        target = self._series[index]
+        old_x, old_y = target.x_data[:], target.y_data[:]
+        self._trim_series_to_max_points(target, max_points)
+        try:
+            target.__post_init__()
+            self._replace_series_or_redraw(index, redraw_axes)
+        except Exception:
+            target.x_data, target.y_data = old_x, old_y
+            raise
+
+    @staticmethod
+    def _trim_series_to_max_points(series: Series, max_points: Optional[int]) -> None:
+        if max_points is None:
+            return
+        if max_points <= 0:
+            raise ValueError("max_points must be positive")
+        if len(series.x_data) <= max_points:
+            return
+        series.x_data = series.x_data[-max_points:]
+        series.y_data = series.y_data[-max_points:]
+
+    def _replace_series_or_redraw(self, index: int, redraw_axes: str | bool) -> None:
+        if redraw_axes not in ("auto", True, False):
+            raise ValueError("redraw_axes must be 'auto', True, or False")
+        if redraw_axes is True or self._last_ranges is None:
+            self.draw()
+            return
+
+        next_ranges = self._calculate_ranges()
+        if redraw_axes == "auto" and next_ranges != self._last_ranges:
+            self.draw()
+            return
+
+        if not all(hasattr(self._canvas, name) for name in ("capture_commands", "replace_group")):
+            self.draw()
+            return
+
+        x_min, x_max, y_min, y_max, y2_min, y2_max = self._last_ranges
+        bar_series = [s for s in self._series if s.chart_type == "bar"]
+        target = self._series[index]
+        ym, yM, log_y = (y2_min, y2_max, self.log_y2) if target.y_axis == 2 else (y_min, y_max, self.log_y)
+        group = self._series_group(index)
+
+        with self._canvas.capture_commands() as commands:
+            with self._series_command_context(index):
+                if target.chart_type == "heatmap":
+                    self._draw_heatmap(target, x_min, x_max, ym, yM)
+                elif target.chart_type == "bar":
+                    self._draw_bar(target, x_min, x_max, ym, yM, log_y, bar_series.index(target), len(bar_series))
+                elif target.chart_type == "area":
+                    self._draw_area(target, x_min, x_max, ym, yM, log_y)
                 else:
-                    self._draw_line_series(series, x_min, x_max, ym, yM, log_y)
+                    self._draw_line_series(target, x_min, x_max, ym, yM, log_y)
+        self._canvas.replace_group(group, commands)
 
-        self._draw_axes(st, bool(y2_series), pw, ph)
-        self._draw_legend(st, bool(y2_series))
+    def _draw_span_annotations(
+        self,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+        y2_min: float,
+        y2_max: float,
+    ) -> None:
+        for annotation in self._annotations:
+            if annotation.kind == "xspan" and annotation.x is not None and annotation.x2 is not None:
+                left = self._map_x(max(min(annotation.x, annotation.x2), x_min), x_min, x_max)
+                right = self._map_x(min(max(annotation.x, annotation.x2), x_max), x_min, x_max)
+                if right <= self._px0 or left >= self._px1:
+                    continue
+                x = max(self._px0, min(left, right))
+                width = min(self._px1, max(left, right)) - x
+                if width > 0:
+                    self._canvas.fill_rect(x, self._py0, width, self._py1 - self._py0 + 1, annotation.fill or annotation.color)
+                    if annotation.text:
+                        self._canvas.text(x + 4, self._py0 + 6, annotation.text, color=annotation.color, size=annotation.size)
+            elif annotation.kind == "yspan" and annotation.y is not None and annotation.y2 is not None:
+                lo, hi = (y2_min, y2_max) if annotation.y_axis == 2 else (y_min, y_max)
+                top = self._map_y(min(max(annotation.y, annotation.y2), hi), lo, hi, annotation.y_axis)
+                bottom = self._map_y(max(min(annotation.y, annotation.y2), lo), lo, hi, annotation.y_axis)
+                if bottom <= self._py0 or top >= self._py1:
+                    continue
+                y = max(self._py0, min(top, bottom))
+                height = min(self._py1, max(top, bottom)) - y
+                if height > 0:
+                    self._canvas.fill_rect(self._px0, y, self._px1 - self._px0 + 1, height, annotation.fill or annotation.color)
+                    if annotation.text:
+                        self._canvas.text(self._px0 + 6, y + 4, annotation.text, color=annotation.color, size=annotation.size)
+
+    def _draw_line_annotations(
+        self,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+        y2_min: float,
+        y2_max: float,
+    ) -> None:
+        for annotation in self._annotations:
+            if annotation.kind == "vline" and annotation.x is not None:
+                if annotation.x < x_min or annotation.x > x_max:
+                    continue
+                x = self._map_x(annotation.x, x_min, x_max)
+                self._canvas.vline(x, self._py0, self._py1 - self._py0 + 1, annotation.color, annotation.width)
+                if annotation.text:
+                    self._canvas.text(min(x + 5, self._px1 - len(annotation.text) * self._CHAR_W), self._py0 + 8, annotation.text, color=annotation.color, size=annotation.size)
+            elif annotation.kind == "hline" and annotation.y is not None:
+                lo, hi = (y2_min, y2_max) if annotation.y_axis == 2 else (y_min, y_max)
+                if annotation.y < lo or annotation.y > hi:
+                    continue
+                y = self._map_y(annotation.y, lo, hi, annotation.y_axis)
+                self._canvas.hline(self._px0, y, self._px1 - self._px0 + 1, annotation.color, annotation.width)
+                if annotation.text:
+                    self._canvas.text(self._px0 + 6, max(self._py0 + 2, y - 18), annotation.text, color=annotation.color, size=annotation.size)
+            elif annotation.kind == "point" and annotation.x is not None and annotation.y is not None:
+                lo, hi = (y2_min, y2_max) if annotation.y_axis == 2 else (y_min, y_max)
+                if annotation.x < x_min or annotation.x > x_max or annotation.y < lo or annotation.y > hi:
+                    continue
+                x = self._map_x(annotation.x, x_min, x_max)
+                y = self._map_y(annotation.y, lo, hi, annotation.y_axis)
+                self._canvas.fill_circle(x, y, 4, annotation.color)
+                if annotation.text:
+                    label_w = len(annotation.text) * self._CHAR_W * annotation.size + 8
+                    label_h = self._CHAR_H * annotation.size + 6
+                    lx = min(max(self._px0 + 2, x + 8), self._px1 - label_w - 2)
+                    ly = min(max(self._py0 + 2, y - label_h - 4), self._py1 - label_h - 2)
+                    if annotation.fill:
+                        self._canvas.fill_rect(lx, ly, label_w, label_h, annotation.fill)
+                        self._canvas.rect(lx, ly, label_w, label_h, annotation.color)
+                    self._canvas.text(lx + 4, ly + 2, annotation.text, color=annotation.color, size=annotation.size)
 
     def _draw_title(self, st: GraphStyle, pw: int) -> None:
         if self.title:
@@ -826,6 +1324,71 @@ class Graph:
             self._canvas.text(self._gx0 + 8, self._py0 - 26, self.y_label, color=st.title_color, size=1)
         if has_y2 and self.y2_label:
             self._canvas.text(self._px1 - len(self.y2_label) * self._CHAR_W, self._py0 - 26, self.y2_label, color=st.y2_axis_color, size=1)
+
+    def _draw_heatmap(self, series: Series, x_min: float, x_max: float, y_min: float, y_max: float) -> None:
+        if series.z_data is None:
+            return
+        values = [value for row in series.z_data for value in row]
+        z_min = min(values) if series.z_min is None else series.z_min
+        z_max = max(values) if series.z_max is None else series.z_max
+        if z_min == z_max:
+            z_max = z_min + 1.0
+
+        for row_index, row in enumerate(series.z_data):
+            y0 = series.y_data[row_index]
+            y1 = series.y_data[row_index + 1]
+            if y1 < y_min or y0 > y_max:
+                continue
+            top = self._map_y(min(y1, y_max), y_min, y_max, series.y_axis)
+            bottom = self._map_y(max(y0, y_min), y_min, y_max, series.y_axis)
+            for column_index, value in enumerate(row):
+                x0 = series.x_data[column_index]
+                x1 = series.x_data[column_index + 1]
+                if x1 < x_min or x0 > x_max:
+                    continue
+                left = self._map_x(max(x0, x_min), x_min, x_max)
+                right = self._map_x(min(x1, x_max), x_min, x_max)
+                x = max(self._px0, min(left, right))
+                y = max(self._py0, min(top, bottom))
+                width = min(self._px1, max(left, right)) - x + 1
+                height = min(self._py1, max(top, bottom)) - y + 1
+                if width <= 0 or height <= 0:
+                    continue
+                self._canvas.fill_rect(x, y, width, height, self._heatmap_color(value, z_min, z_max, series.color_map))
+                if series.outline_color:
+                    self._canvas.rect(x, y, width, height, series.outline_color)
+
+    def _heatmap_color(self, value: float, z_min: float, z_max: float, color_map: Optional[List[str]]) -> str:
+        colors = color_map or DEFAULT_HEATMAP_COLOURS
+        if len(colors) == 1:
+            return colors[0]
+        t = _clamp((value - z_min) / (z_max - z_min), 0.0, 1.0)
+        scaled = t * (len(colors) - 1)
+        index = min(len(colors) - 2, int(math.floor(scaled)))
+        frac = scaled - index
+        return self._interpolate_color(colors[index], colors[index + 1], frac)
+
+    @staticmethod
+    def _interpolate_color(start: str, end: str, frac: float) -> str:
+        sr, sg, sb = Graph._hex_to_rgb(start)
+        er, eg, eb = Graph._hex_to_rgb(end)
+        return "#{:02X}{:02X}{:02X}".format(
+            round(sr + (er - sr) * frac),
+            round(sg + (eg - sg) * frac),
+            round(sb + (eb - sb) * frac),
+        )
+
+    @staticmethod
+    def _hex_to_rgb(color: str) -> Tuple[int, int, int]:
+        value = color.strip()
+        if not value.startswith("#"):
+            raise ValueError("Heatmap color_map colors must be #RGB or #RRGGBB hex strings")
+        value = value[1:]
+        if len(value) == 3:
+            value = "".join(ch * 2 for ch in value)
+        if len(value) != 6:
+            raise ValueError("Heatmap color_map colors must be #RGB or #RRGGBB hex strings")
+        return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
 
     def _draw_line_series(self, series: Series, x_min: float, x_max: float, y_min: float, y_max: float, log_y: bool) -> None:
         points = self._series_points(series, x_min, x_max, y_min, y_max, log_y)

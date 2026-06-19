@@ -272,6 +272,44 @@
       }
     }
 
+    function replaceCommandGroup(command) {
+      const pageKey = getCommandPageKey(command);
+      const targetBuffer = getPageBuffer(pageKey);
+      const targetIsVisible = isDisplayingPage(pageKey);
+      const group = String(command.group || "");
+      const replacementCommands = Array.isArray(command.commands) ? command.commands : [];
+      if (!group) return;
+
+      let insertAt = targetBuffer.length;
+      for (let index = 0; index < targetBuffer.length; index += 1) {
+        if (targetBuffer[index].group === group) {
+          insertAt = index;
+          break;
+        }
+      }
+
+      const keptCommands = targetBuffer.filter((item) => item.group !== group);
+      const normalizedCommands = replacementCommands.map((item) => {
+        const next = { ...item, group };
+        if (pageKey !== null && next.page === undefined && next.palletPage === undefined) {
+          next.page = pageKey;
+        }
+        return next;
+      });
+
+      insertAt = Math.min(insertAt, keptCommands.length);
+      targetBuffer.length = 0;
+      targetBuffer.push(
+        ...keptCommands.slice(0, insertAt),
+        ...normalizedCommands,
+        ...keptCommands.slice(insertAt)
+      );
+
+      if (targetIsVisible) {
+        redrawDisplayBuffer();
+      }
+    }
+
     function redrawCommands(commands) {
       resetTerminalRegions();
       for (const command of commands) {
@@ -280,6 +318,7 @@
     }
 
     function redrawDisplayBuffer() {
+      clearCanvas("white");
       redrawCommands(displayBuffer);
     }
 
@@ -334,6 +373,11 @@
 
       if (command.type === "__pallet_delete_page" || command.type === "page_delete") {
         deleteNamedPage(pageKey);
+        return;
+      }
+
+      if (command.type === "__pallet_replace_group" || command.type === "group_replace") {
+        replaceCommandGroup(command);
         return;
       }
 
