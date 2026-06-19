@@ -141,6 +141,93 @@
       width: auto;
     }
 
+    .pallet-status {
+      --status-color: #2563EB;
+      margin: 0.65rem 0;
+    }
+
+    .pallet-status-row {
+      align-items: center;
+      display: flex;
+      gap: 0.55rem;
+      justify-content: space-between;
+    }
+
+    .pallet-status-label {
+      color: #475569;
+      font-size: 0.84rem;
+    }
+
+    .pallet-status-value {
+      color: #0F172A;
+      font-weight: 700;
+    }
+
+    .pallet-status-badge,
+    .pallet-status-alert {
+      background: color-mix(in srgb, var(--status-color) 14%, white);
+      border: 1px solid color-mix(in srgb, var(--status-color) 38%, white);
+      border-radius: 999px;
+      color: var(--status-color);
+      display: inline-flex;
+      font-size: 0.8rem;
+      font-weight: 700;
+      padding: 0.25rem 0.6rem;
+    }
+
+    .pallet-status-alert {
+      border-radius: 0.5rem;
+      box-sizing: border-box;
+      display: block;
+      padding: 0.65rem 0.75rem;
+      width: 100%;
+    }
+
+    .pallet-status-led {
+      background: var(--status-color);
+      border-radius: 50%;
+      box-shadow: 0 0 0.55rem var(--status-color);
+      flex: 0 0 auto;
+      height: 0.72rem;
+      width: 0.72rem;
+    }
+
+    .pallet-status-kpi .pallet-status-value {
+      color: var(--status-color);
+      display: block;
+      font-size: 1.8rem;
+      line-height: 1.1;
+      margin-top: 0.2rem;
+    }
+
+    .pallet-progress-track {
+      background: #E2E8F0;
+      border-radius: 999px;
+      height: 0.7rem;
+      margin-top: 0.4rem;
+      overflow: hidden;
+    }
+
+    .pallet-progress-fill {
+      background: var(--status-color);
+      border-radius: inherit;
+      height: 100%;
+      transition: width 160ms ease;
+    }
+
+    .pallet-status-spinner {
+      animation: pallet-spin 0.8s linear infinite;
+      border: 3px solid #E2E8F0;
+      border-radius: 50%;
+      border-top-color: var(--status-color);
+      height: 1rem;
+      width: 1rem;
+    }
+
+    @keyframes pallet-spin {
+      to { transform: rotate(360deg); }
+    }
+
     .pallet-table-wrap {
       border: 1px solid #E2E8F0;
       border-radius: 0.5rem;
@@ -245,6 +332,7 @@
     let uiCards = new Map();
     let uiControls = new Map();
     let uiTables = new Map();
+    let uiStatuses = new Map();
     const maxReconnectDelay = 10000;
 
     function resizeCanvas() {
@@ -299,6 +387,7 @@
       uiCards = new Map();
       uiControls = new Map();
       uiTables = new Map();
+      uiStatuses = new Map();
     }
 
     function resetXtermRegions() {
@@ -555,6 +644,16 @@
           break;
         }
 
+        case "ui_status": {
+          defineUiStatus(command);
+          break;
+        }
+
+        case "ui_status_update": {
+          updateUiStatus(command);
+          break;
+        }
+
         case "ui_table": {
           defineUiTable(command);
           break;
@@ -796,6 +895,113 @@
       for (const name of ["min", "max", "step", "placeholder"]) {
         if (command[name] != null) control.input[name] = command[name];
       }
+    }
+
+    function statusColor(status, customColor) {
+      if (customColor) return customColor;
+      return {
+        success: "#16A34A",
+        warning: "#D97706",
+        danger: "#DC2626",
+        info: "#2563EB",
+        neutral: "#64748B"
+      }[String(status || "info")] || "#2563EB";
+    }
+
+    function defineUiStatus(command) {
+      const id = String(command.id || "status");
+      const existing = uiStatuses.get(id);
+      if (existing) existing.root.remove();
+      const root = document.createElement("div");
+      root.className = "pallet-status";
+      root.style.pointerEvents = "auto";
+      uiParent(command.card, command.grid).appendChild(root);
+      const state = { id, root, data: { ...command } };
+      uiStatuses.set(id, state);
+      renderUiStatus(state);
+    }
+
+    function updateUiStatus(command) {
+      const state = uiStatuses.get(String(command.id || ""));
+      if (!state) return;
+      Object.assign(state.data, command);
+      renderUiStatus(state);
+    }
+
+    function formatStatusValue(value, units = "") {
+      if (value === undefined || value === null) return "";
+      return `${value}${units || ""}`;
+    }
+
+    function renderUiStatus(state) {
+      const data = state.data;
+      const kind = String(data.kind || "badge").toLowerCase();
+      const color = statusColor(data.status, data.color);
+      state.root.className = `pallet-status pallet-status-${kind}`;
+      state.root.style.setProperty("--status-color", color);
+      state.root.replaceChildren();
+      const label = document.createElement("span");
+      label.className = "pallet-status-label";
+      label.textContent = String(data.label || "");
+      const value = document.createElement("span");
+      value.className = "pallet-status-value";
+      value.textContent = formatStatusValue(data.value ?? data.text, data.units);
+
+      if (kind === "kpi") {
+        state.root.append(label, value);
+        return;
+      }
+      if (kind === "alert") {
+        const alert = document.createElement("div");
+        alert.className = "pallet-status-alert";
+        alert.textContent = String(data.message ?? data.value ?? data.text ?? data.label ?? "");
+        state.root.appendChild(alert);
+        return;
+      }
+      const row = document.createElement("div");
+      row.className = "pallet-status-row";
+      row.appendChild(label);
+      const indicator = document.createElement("div");
+      indicator.className = "pallet-status-row";
+      if (kind === "led") {
+        const led = document.createElement("span");
+        led.className = "pallet-status-led";
+        if (data.active === false) {
+          led.style.background = "#CBD5E1";
+          led.style.boxShadow = "none";
+        }
+        indicator.append(led, value);
+      } else if (kind === "spinner") {
+        const spinner = document.createElement("span");
+        spinner.className = "pallet-status-spinner";
+        if (data.active === false) spinner.style.visibility = "hidden";
+        indicator.append(spinner, value);
+      } else if (kind === "badge") {
+        value.className = "pallet-status-badge";
+        indicator.appendChild(value);
+      } else if (kind === "progress") {
+        row.appendChild(value);
+        const minimum = Number(data.min ?? 0);
+        const maximum = Number(data.max ?? 100);
+        const numericValue = Number(data.value ?? minimum);
+        const percent = maximum === minimum ? 0 : Math.max(0, Math.min(100, (numericValue - minimum) / (maximum - minimum) * 100));
+        const track = document.createElement("div");
+        track.className = "pallet-progress-track";
+        track.setAttribute("role", "progressbar");
+        track.setAttribute("aria-valuemin", String(minimum));
+        track.setAttribute("aria-valuemax", String(maximum));
+        track.setAttribute("aria-valuenow", String(numericValue));
+        const fill = document.createElement("div");
+        fill.className = "pallet-progress-fill";
+        fill.style.width = `${percent}%`;
+        track.appendChild(fill);
+        state.root.append(row, track);
+        return;
+      } else {
+        indicator.appendChild(value);
+      }
+      row.appendChild(indicator);
+      state.root.appendChild(row);
     }
 
     function normalizeTableColumns(columns) {

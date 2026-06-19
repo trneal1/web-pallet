@@ -56,6 +56,27 @@ class UIControl:
         return self
 
 
+class StatusWidget:
+    """Convenience handle for an updateable dashboard status widget."""
+
+    def __init__(self, pallet: "Pallet", status_id: str) -> None:
+        self.pallet = pallet
+        self.id = status_id
+
+    def set(
+        self,
+        value: Any = _UNSET,
+        *,
+        status: Optional[str] = None,
+        label: Optional[str] = None,
+        active: Optional[bool] = None,
+        **properties: Any,
+    ) -> dict[str, Any]:
+        return self.pallet.update_status_widget(
+            self.id, value=value, status=status, label=label, active=active, **properties
+        )
+
+
 class DataTable:
     """Convenience handle for keyed live table updates."""
 
@@ -486,6 +507,92 @@ class Pallet:
             command["disabled"] = disabled
         if label is not None:
             command["label"] = label
+        command.update(properties)
+        return self.command(command)
+
+    def status_widget(
+        self,
+        status_id: str,
+        *,
+        kind: str = "badge",
+        label: str = "",
+        value: Any = None,
+        status: str = "info",
+        card: Optional[str] = None,
+        grid: Optional[str] = None,
+        units: str = "",
+        minimum: float = 0,
+        maximum: float = 100,
+        color: Optional[str] = None,
+        active: bool = True,
+        message: Optional[str] = None,
+    ) -> StatusWidget:
+        self.define_status_widget(
+            status_id, kind=kind, label=label, value=value, status=status,
+            card=card, grid=grid, units=units, minimum=minimum, maximum=maximum,
+            color=color, active=active, message=message,
+        )
+        return StatusWidget(self, str(status_id))
+
+    def define_status_widget(
+        self,
+        status_id: str,
+        *,
+        kind: str = "badge",
+        label: str = "",
+        value: Any = None,
+        status: str = "info",
+        card: Optional[str] = None,
+        grid: Optional[str] = None,
+        units: str = "",
+        minimum: float = 0,
+        maximum: float = 100,
+        color: Optional[str] = None,
+        active: bool = True,
+        message: Optional[str] = None,
+    ) -> dict[str, Any]:
+        if kind not in {"badge", "led", "progress", "kpi", "alert", "spinner"}:
+            raise ValueError("kind must be badge, led, progress, kpi, alert, or spinner")
+        if status not in {"info", "success", "warning", "danger", "neutral"}:
+            raise ValueError("status must be info, success, warning, danger, or neutral")
+        if kind == "progress" and maximum <= minimum:
+            raise ValueError("progress maximum must be greater than minimum")
+        command: dict[str, Any] = {
+            "type": "ui_status", "id": str(status_id), "kind": kind,
+            "label": label, "value": value, "status": status, "units": units,
+            "min": minimum, "max": maximum, "active": active,
+        }
+        if card is not None:
+            command["card"] = str(card)
+        if grid is not None:
+            command["grid"] = str(grid)
+        if color is not None:
+            command["color"] = color
+        if message is not None:
+            command["message"] = message
+        return self.command(command)
+
+    def update_status_widget(
+        self,
+        status_id: str,
+        *,
+        value: Any = _UNSET,
+        status: Optional[str] = None,
+        label: Optional[str] = None,
+        active: Optional[bool] = None,
+        **properties: Any,
+    ) -> dict[str, Any]:
+        if status is not None and status not in {"info", "success", "warning", "danger", "neutral"}:
+            raise ValueError("status must be info, success, warning, danger, or neutral")
+        command: dict[str, Any] = {"type": "ui_status_update", "id": str(status_id)}
+        if value is not _UNSET:
+            command["value"] = value
+        if status is not None:
+            command["status"] = status
+        if label is not None:
+            command["label"] = label
+        if active is not None:
+            command["active"] = active
         command.update(properties)
         return self.command(command)
 

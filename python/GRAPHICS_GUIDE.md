@@ -551,6 +551,63 @@ while True:
 Alternatively, use `pallet.run_event_loop()`. Browser events include `id`,
 `event`, `value`, `kind`, and the active page when applicable.
 
+### Status widgets
+
+Available status widgets are `badge`, `led`, `progress`, `kpi`, `alert`, and
+`spinner`. Semantic states are `info`, `success`, `warning`, `danger`, and
+`neutral`.
+
+```python
+connection = pallet.status_widget(
+    "connection",
+    card="results",
+    kind="led",
+    label="Bridge",
+    value="Online",
+    status="success",
+)
+
+load = pallet.status_widget(
+    "load",
+    card="results",
+    kind="progress",
+    label="CPU",
+    value=42,
+    units="%",
+    minimum=0,
+    maximum=100,
+)
+
+total = pallet.status_widget(
+    "total",
+    card="results",
+    kind="kpi",
+    label="Messages",
+    value=1284,
+)
+
+warning = pallet.status_widget(
+    "warning",
+    card="results",
+    kind="alert",
+    message="Temperature approaching limit",
+    status="warning",
+)
+```
+
+Update widgets without rebuilding their card:
+
+```python
+connection.set("Offline", status="neutral", active=False)
+load.set(87, status="warning")
+total.set(1285)
+warning.set(message="Temperature normal", status="success")
+```
+
+Use `color="#..."` when a semantic status color is not appropriate. LED and
+spinner widgets accept `active=False`; progress widgets clamp their visual fill
+to their configured bounds.
+
 ### Live data tables
 
 ```python
