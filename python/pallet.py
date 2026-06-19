@@ -464,6 +464,7 @@ class Pallet:
         *,
         line_cap: str = "butt",
         line_join: str = "round",
+        dash: Optional[Iterable[float]] = None,
     ) -> dict[str, Any]:
         return self.command({
             "type": "path",
@@ -472,4 +473,5 @@ class Pallet:
             "width": width,
             "lineCap": line_cap,
             "lineJoin": line_join,
+            "dash": [float(value) for value in (dash or [])],
         })

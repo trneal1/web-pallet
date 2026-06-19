@@ -29,9 +29,10 @@ import math
 import random
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 from pallet import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, Pallet
-from pallet_graph_lib import ArcGauge, BarGauge, CircularMeter, GaugeStyle, Graph
+from pallet_graph_lib import ArcGauge, BarGauge, CircularMeter, GaugeStyle, Graph, PolarChart
 
 
 def print_pallet_size_info(pallet: Pallet) -> None:
@@ -228,9 +229,69 @@ def demo_area_stacked(pallet: Pallet) -> None:
     rx = [max(0, 5 + 8 * math.sin(t * math.pi / 6) + 3 * math.sin(t * math.pi / 2)) for t in ts]
     tx = [max(0, 3 + 4 * math.cos(t * math.pi / 6) + 2 * math.cos(t * math.pi / 3)) for t in ts]
     g = Graph(pallet, title="Network Traffic", x_label="Hour", y_label="MB/s", y_min=0, y_max=20)
-    g.add_area_series(ts, rx, color="#BAE6FD", outline_color="#0284C7", label="RX")
-    g.add_area_series(ts, tx, color="#FBCFE8", outline_color="#DB2777", label="TX")
+    g.add_area_series(ts, rx, color="#BAE6FD", outline_color="#0284C7", label="RX", stack="traffic")
+    g.add_area_series(ts, tx, color="#FBCFE8", outline_color="#DB2777", label="TX", stack="traffic")
     g.draw()
+
+
+def demo_datetime_axis(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    start = datetime(2026, 6, 19, 8, 0, tzinfo=timezone.utc)
+    times = [start + timedelta(minutes=30 * index) for index in range(17)]
+    values = [42 + 10 * math.sin(index * 0.55) for index in range(len(times))]
+    Graph(pallet, title="Datetime Axis", x_label="UTC", y_label="value").add_series(
+        times, values, label="sensor", spline=True
+    ).draw()
+
+
+def demo_bar_stacked_groups(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    quarters = [1, 2, 3, 4]
+    g = Graph(pallet, title="Grouped Stacks", x_label="Quarter", y_label="Units", y_min=0)
+    g.add_bar_series(quarters, [70, 80, 75, 90], label="A retail", color="#0EA5E9", stack="A")
+    g.add_bar_series(quarters, [35, 40, 45, 50], label="A online", color="#7DD3FC", stack="A")
+    g.add_bar_series(quarters, [60, 68, 72, 78], label="B retail", color="#F97316", stack="B")
+    g.add_bar_series(quarters, [25, 32, 30, 38], label="B online", color="#FDBA74", stack="B")
+    g.draw()
+
+
+def demo_radar(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    chart = PolarChart(
+        pallet,
+        ["Speed", "Range", "Comfort", "Safety", "Value"],
+        title="Vehicle Comparison",
+        maximum=10,
+    )
+    chart.add_series([8, 6, 7, 9, 5], label="Model A", color="#2563EB", fill="rgba(37, 99, 235, 0.18)")
+    chart.add_series([6, 9, 8, 7, 8], label="Model B", color="#EA580C", fill="rgba(234, 88, 12, 0.18)")
+    chart.draw()
+
+
+def demo_styles_confidence_gaps(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    xs = [index * 0.25 for index in range(45)]
+    mean = [math.sin(x) for x in xs]
+    lower = [value - 0.22 for value in mean]
+    upper = [value + 0.22 for value in mean]
+    for index in (18, 19, 20):
+        mean[index] = None
+        lower[index] = None
+        upper[index] = None
+    g = Graph(pallet, title="Styles, confidence & gaps", x_label="time", y_label="value")
+    g.add_confidence_band(xs, lower, upper, color="#0284C7", fill="rgba(56, 189, 248, 0.20)", label="95% band")
+    g.add_series(xs, mean, color="#0369A1", label="estimate", draw_markers=False, line_width=4, line_style="dashed")
+    g.add_series([xs[0], xs[-1]], [0, 0], color="#DC2626", label="baseline", draw_markers=False, line_style="dotted")
+    g.draw()
+
+
+def demo_nice_axes(pallet: Pallet) -> None:
+    start_demo_page(pallet)
+    xs = [3.7 + index * 3.85 for index in range(25)]
+    ys = [0.013 + 0.071 * math.sin(index * 0.42) for index in range(len(xs))]
+    Graph(pallet, title="Automatic Nice Axes", x_label="measurement", y_label="offset").add_series(
+        xs, ys, color="#7C3AED", label="signal", draw_markers=False, spline=True
+    ).draw()
 
 
 def demo_bar_and_line(pallet: Pallet) -> None:
@@ -653,6 +714,11 @@ DEMOS = [
     (24, "Live append helper", demo_live_append),
     (25, "Annotations", demo_annotations),
     (26, "Heatmap / matrix", demo_heatmap),
+    (27, "Datetime axis", demo_datetime_axis),
+    (28, "Grouped stacked bars", demo_bar_stacked_groups),
+    (29, "Polar / radar", demo_radar),
+    (30, "Styles, confidence and gaps", demo_styles_confidence_gaps),
+    (31, "Automatic nice axes", demo_nice_axes),
 ]
 
 

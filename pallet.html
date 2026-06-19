@@ -497,7 +497,9 @@
           ctx.lineWidth = command.width || 1;
           ctx.lineCap = command.lineCap || "butt";
           ctx.lineJoin = command.lineJoin || "round";
+          ctx.setLineDash(Array.isArray(command.dash) ? command.dash : []);
           ctx.stroke();
+          ctx.setLineDash([]);
           ctx.lineCap = "butt";
           ctx.lineJoin = "miter";
           break;
