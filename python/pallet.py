@@ -131,12 +131,14 @@ class Pallet:
         self.wait_for_ack = wait_for_ack
         self.page = None if page is None else str(page)
         self.browser_status: dict[str, Any] = {}
-        self.canvas_width: Optional[int] = None
-        self.canvas_height: Optional[int] = None
-        self.css_width: Optional[int] = None
-        self.css_height: Optional[int] = None
-        self.max_css_width: Optional[int] = None
-        self.max_css_height: Optional[int] = None
+        self.viewport_width: Optional[int] = None
+        self.viewport_height: Optional[int] = None
+        self.content_width: Optional[int] = None
+        self.content_height: Optional[int] = None
+        self.scroll_x: Optional[int] = None
+        self.scroll_y: Optional[int] = None
+        self.buffer_width: Optional[int] = None
+        self.buffer_height: Optional[int] = None
         self.screen_width: Optional[int] = None
         self.screen_height: Optional[int] = None
         self.screen_avail_width: Optional[int] = None
@@ -217,20 +219,22 @@ class Pallet:
 
     def _apply_browser_status(self, status: dict[str, Any]) -> None:
         self.browser_status = status
-        self.canvas_width = self._positive_int(status.get("canvas_width"))
-        self.canvas_height = self._positive_int(status.get("canvas_height"))
-        self.css_width = self._positive_int(status.get("css_width"))
-        self.css_height = self._positive_int(status.get("css_height"))
-        self.max_css_width = self._positive_int(status.get("max_css_width"))
-        self.max_css_height = self._positive_int(status.get("max_css_height"))
+        self.viewport_width = self._positive_int(status.get("viewport_width"))
+        self.viewport_height = self._positive_int(status.get("viewport_height"))
+        self.content_width = self._positive_int(status.get("content_width"))
+        self.content_height = self._positive_int(status.get("content_height"))
+        self.scroll_x = self._nonnegative_int(status.get("scroll_x"))
+        self.scroll_y = self._nonnegative_int(status.get("scroll_y"))
+        self.buffer_width = self._positive_int(status.get("buffer_width"))
+        self.buffer_height = self._positive_int(status.get("buffer_height"))
         self.screen_width = self._positive_int(status.get("screen_width"))
         self.screen_height = self._positive_int(status.get("screen_height"))
         self.screen_avail_width = self._positive_int(status.get("screen_avail_width"))
         self.screen_avail_height = self._positive_int(status.get("screen_avail_height"))
         self.device_pixel_ratio = status.get("device_pixel_ratio")
 
-        logical_width = self.css_width or self.canvas_width
-        logical_height = self.css_height or self.canvas_height
+        logical_width = self.viewport_width
+        logical_height = self.viewport_height
         if self._auto_width and logical_width:
             self.width = logical_width
         if self._auto_height and logical_height:
@@ -239,6 +243,12 @@ class Pallet:
     @staticmethod
     def _positive_int(value: Any) -> Optional[int]:
         if isinstance(value, (int, float)) and value > 0:
+            return round(value)
+        return None
+
+    @staticmethod
+    def _nonnegative_int(value: Any) -> Optional[int]:
+        if isinstance(value, (int, float)) and value >= 0:
             return round(value)
         return None
 

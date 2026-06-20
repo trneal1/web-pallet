@@ -37,12 +37,14 @@ from pallet_graph_lib import ArcGauge, BarGauge, CircularMeter, GaugeStyle, Grap
 
 def print_pallet_size_info(pallet: Pallet) -> None:
     print(f"Using pallet drawing size {pallet.width}x{pallet.height}")
-    if pallet.css_width and pallet.css_height:
-        print(f"Browser CSS size {pallet.css_width}x{pallet.css_height}")
-    if pallet.canvas_width and pallet.canvas_height:
-        print(f"Browser canvas buffer {pallet.canvas_width}x{pallet.canvas_height}")
-    if pallet.max_css_width and pallet.max_css_height:
-        print(f"Browser max CSS size {pallet.max_css_width}x{pallet.max_css_height}")
+    if pallet.viewport_width and pallet.viewport_height:
+        print(f"Browser viewport {pallet.viewport_width}x{pallet.viewport_height}")
+    if pallet.content_width and pallet.content_height:
+        print(f"Scrollable content {pallet.content_width}x{pallet.content_height}")
+    if pallet.scroll_x is not None and pallet.scroll_y is not None:
+        print(f"Scroll position {pallet.scroll_x},{pallet.scroll_y}")
+    if pallet.buffer_width and pallet.buffer_height:
+        print(f"Canvas buffer {pallet.buffer_width}x{pallet.buffer_height}")
     if pallet.screen_width and pallet.screen_height:
         print(f"Screen size {pallet.screen_width}x{pallet.screen_height}")
     if pallet.screen_avail_width and pallet.screen_avail_height:

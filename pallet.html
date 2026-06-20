@@ -25,6 +25,39 @@
       border-bottom: 1px solid #374151;
     }
 
+    body.settings-hidden {
+      grid-template-rows: 1fr;
+    }
+
+    body.settings-hidden header {
+      display: none;
+    }
+
+    #showSettings {
+      display: none;
+      position: fixed;
+      right: 0.75rem;
+      top: 0.75rem;
+      z-index: 1000;
+      width: 2.5rem;
+      height: 2.5rem;
+      padding: 0;
+      border: 1px solid #4b5563;
+      border-radius: 50%;
+      background: rgba(31, 41, 55, 0.9);
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+      font-size: 1.15rem;
+    }
+
+    body.settings-hidden #showSettings {
+      display: block;
+    }
+
+    #hideSettings {
+      flex: 0 0 auto;
+      background: #4b5563;
+    }
+
     input,
     select {
       flex: 1;
@@ -344,7 +377,10 @@
     <button id="deletePage" disabled>Delete Page</button>
     <button id="clear">Clear</button>
     <span id="status">Disconnected</span>
+    <button id="hideSettings" type="button" title="Hide settings" aria-label="Hide settings">▲</button>
   </header>
+
+  <button id="showSettings" type="button" title="Show settings" aria-label="Show settings">⚙</button>
 
   <main>
     <canvas id="canvas"></canvas>
@@ -368,6 +404,8 @@
     const deletePageButton = document.getElementById("deletePage");
     const clearButton = document.getElementById("clear");
     const statusText = document.getElementById("status");
+    const hideSettingsButton = document.getElementById("hideSettings");
+    const showSettingsButton = document.getElementById("showSettings");
 
     let socket = null;
     let reconnectTimer = null;
@@ -396,6 +434,8 @@
     let charts = new Map();
     const loadedScripts = new Map();
     const maxReconnectDelay = 10000;
+    let viewportRefreshPending = false;
+    let statusSendPending = false;
 
     function resizeCanvas() {
       const dpr = window.devicePixelRatio || 1;
@@ -405,18 +445,39 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
+    function refreshViewport() {
+      if (viewportRefreshPending) return;
+      viewportRefreshPending = true;
+      requestAnimationFrame(() => {
+        viewportRefreshPending = false;
+        resizeCanvas();
+        redrawDisplayBuffer();
+        fitXtermRegions();
+        for (const state of charts.values()) state.chart.resize();
+        sendCanvasStatus();
+      });
+    }
+
+    function setSettingsVisible(visible) {
+      document.body.classList.toggle("settings-hidden", !visible);
+      showSettingsButton.setAttribute("aria-expanded", String(visible));
+      refreshViewport();
+    }
+
     function getCanvasStatus() {
       const rect = canvas.getBoundingClientRect();
-      const mainRect = canvas.parentElement.getBoundingClientRect();
+      const main = canvas.parentElement;
       return {
         type: "__pallet_status",
-        canvas_width: canvas.width,
-        canvas_height: canvas.height,
-        css_width: Math.round(rect.width),
-        css_height: Math.round(rect.height),
+        viewport_width: Math.round(rect.width),
+        viewport_height: Math.round(rect.height),
+        content_width: Math.round(main.scrollWidth),
+        content_height: Math.round(main.scrollHeight),
+        scroll_x: Math.round(main.scrollLeft),
+        scroll_y: Math.round(main.scrollTop),
+        buffer_width: canvas.width,
+        buffer_height: canvas.height,
         device_pixel_ratio: window.devicePixelRatio || 1,
-        max_css_width: Math.round(mainRect.width),
-        max_css_height: Math.round(mainRect.height),
         screen_width: window.screen.width,
         screen_height: window.screen.height,
         screen_avail_width: window.screen.availWidth,
@@ -428,6 +489,15 @@
     function sendCanvasStatus() {
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify(getCanvasStatus()));
+    }
+
+    function scheduleCanvasStatus() {
+      if (statusSendPending) return;
+      statusSendPending = true;
+      requestAnimationFrame(() => {
+        statusSendPending = false;
+        sendCanvasStatus();
+      });
     }
 
     function clearCanvas(color = "white") {
@@ -1775,6 +1845,7 @@
         for (const command of commands) {
           drawCommand(command);
         }
+        refreshViewport();
       } catch (error) {
         console.error("Invalid JSON drawing message:", event.data, error);
       }
@@ -1813,7 +1884,7 @@
       socket.addEventListener("open", () => {
         statusText.textContent = "Connected";
         reconnectAttempts = 0;
-        sendCanvasStatus();
+        setSettingsVisible(false);
       });
 
       socket.addEventListener("message", handleMessage);
@@ -1822,15 +1893,18 @@
         socket = null;
 
         if (shouldReconnect) {
+          setSettingsVisible(true);
           scheduleReconnect();
         } else {
           statusText.textContent = "Disconnected";
           connectButton.textContent = "Connect";
+          setSettingsVisible(true);
         }
       });
 
       socket.addEventListener("error", () => {
         statusText.textContent = shouldReconnect ? "Connection error. Retrying..." : "Connection error";
+        setSettingsVisible(true);
       });
     }
 
@@ -1860,6 +1934,8 @@
     }
 
     connectButton.addEventListener("click", connect);
+    hideSettingsButton.addEventListener("click", () => setSettingsVisible(false));
+    showSettingsButton.addEventListener("click", () => setSettingsVisible(true));
     pageSelect.addEventListener("change", () => {
       const pageKey = normalizePageKey(pageSelect.value);
       if (pageKey === null) {
@@ -1876,6 +1952,7 @@
       color: "white",
       ...(displayPageKey !== null ? { page: displayPageKey } : {})
     }));
+    canvas.parentElement.addEventListener("scroll", scheduleCanvasStatus, { passive: true });
     canvas.addEventListener("wheel", (event) => {
       const rect = canvas.getBoundingClientRect();
       const region = getTerminalAtPoint(event.clientX - rect.left, event.clientY - rect.top);

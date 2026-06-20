@@ -28,13 +28,15 @@ async def websocket_handler(websocket):
 
             if isinstance(command, dict) and command.get("type") == "__pallet_status":
                 web_clients[websocket] = {
-                    "canvas_width": command.get("canvas_width"),
-                    "canvas_height": command.get("canvas_height"),
-                    "css_width": command.get("css_width"),
-                    "css_height": command.get("css_height"),
+                    "viewport_width": command.get("viewport_width"),
+                    "viewport_height": command.get("viewport_height"),
+                    "content_width": command.get("content_width"),
+                    "content_height": command.get("content_height"),
+                    "scroll_x": command.get("scroll_x"),
+                    "scroll_y": command.get("scroll_y"),
+                    "buffer_width": command.get("buffer_width"),
+                    "buffer_height": command.get("buffer_height"),
                     "device_pixel_ratio": command.get("device_pixel_ratio"),
-                    "max_css_width": command.get("max_css_width"),
-                    "max_css_height": command.get("max_css_height"),
                     "screen_width": command.get("screen_width"),
                     "screen_height": command.get("screen_height"),
                     "screen_avail_width": command.get("screen_avail_width"),
@@ -97,7 +99,7 @@ def browser_status():
     clients = [
         status
         for status in web_clients.values()
-        if status.get("canvas_width") and status.get("canvas_height")
+        if status.get("viewport_width") and status.get("viewport_height")
     ]
     status = {
         "web_clients": len(web_clients),

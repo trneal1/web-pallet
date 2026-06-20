@@ -504,8 +504,8 @@ std::string browser_status_fields_json(const std::map<int, WebClient>& web_clien
     for (const auto& item : web_clients) {
         if (!item.second.handshaken) continue;
         ++connected_clients;
-        const auto width = item.second.status.values.find("canvas_width");
-        const auto height = item.second.status.values.find("canvas_height");
+        const auto width = item.second.status.values.find("viewport_width");
+        const auto height = item.second.status.values.find("viewport_height");
         if (width != item.second.status.values.end() && height != item.second.status.values.end() &&
             json_value_truthy(width->second) && json_value_truthy(height->second)) {
             browsers.push_back(&item.second.status);
@@ -762,8 +762,9 @@ private:
         const std::string type = extract_json_string(message, "type");
         if (looks_like_json_object(message) && type == "__pallet_status") {
             static const std::vector<std::string> keys = {
-                "canvas_width", "canvas_height", "css_width", "css_height", "device_pixel_ratio",
-                "max_css_width", "max_css_height", "screen_width", "screen_height",
+                "viewport_width", "viewport_height", "content_width", "content_height",
+                "scroll_x", "scroll_y", "buffer_width", "buffer_height", "device_pixel_ratio",
+                "screen_width", "screen_height",
                 "screen_avail_width", "screen_avail_height", "echarts_version",
             };
             BrowserStatus status;
