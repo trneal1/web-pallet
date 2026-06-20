@@ -9,6 +9,7 @@ DEFAULT_LISTEN_HOST = "0.0.0.0"
 DEFAULT_WEBSOCKET_PORT = 8080
 DEFAULT_TCP_PORT = 9000
 DEFAULT_TCP_LIMIT = 16 * 1024 * 1024
+WEBSOCKET_SEND_TIMEOUT = 5.0
 
 async def websocket_handler(websocket):
     web_clients[websocket] = {}
@@ -75,16 +76,22 @@ async def publish_tcp_event(event):
 
 async def broadcast(command):
     message = json.dumps(command)
-    dead = []
+    clients = list(web_clients)
 
-    for ws in list(web_clients):
+    async def send(ws):
         try:
-            await ws.send(message)
+            await asyncio.wait_for(
+                ws.send(message),
+                timeout=WEBSOCKET_SEND_TIMEOUT,
+            )
+            return True
         except Exception:
-            dead.append(ws)
+            return False
 
-    for ws in dead:
-        web_clients.pop(ws, None)
+    results = await asyncio.gather(*(send(ws) for ws in clients))
+    for ws, sent in zip(clients, results):
+        if not sent:
+            web_clients.pop(ws, None)
 
 def browser_status():
     clients = [

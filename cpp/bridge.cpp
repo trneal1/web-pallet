@@ -21,6 +21,7 @@
 #include <array>
 #include <cerrno>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -45,6 +46,7 @@ constexpr const char* DEFAULT_LISTEN_HOST = "0.0.0.0";
 constexpr int DEFAULT_WEBSOCKET_PORT = 8080;
 constexpr int DEFAULT_TCP_PORT = 9000;
 constexpr std::size_t DEFAULT_TCP_LIMIT = 16 * 1024 * 1024;
+constexpr auto WEBSOCKET_SEND_TIMEOUT = std::chrono::seconds(5);
 constexpr const char* WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 struct Args {
@@ -63,6 +65,7 @@ struct WebClient {
     bool handshaken = false;
     std::string input;
     std::string output;
+    std::optional<std::chrono::steady_clock::time_point> send_deadline;
     BrowserStatus status;
 };
 
@@ -538,6 +541,9 @@ void queue_tcp_json(TcpClient& client, const std::string& payload) {
 }
 
 void queue_web_text(WebClient& client, const std::string& message) {
+    if (client.output.empty()) {
+        client.send_deadline = std::chrono::steady_clock::now() + WEBSOCKET_SEND_TIMEOUT;
+    }
     client.output += websocket_text_frame(message);
 }
 
@@ -568,6 +574,8 @@ public:
                   << " with " << args_.tcp_limit << " byte read limit\n";
 
         while (true) {
+            remove_stalled_web_clients();
+
             fd_set read_fds;
             fd_set write_fds;
             FD_ZERO(&read_fds);
@@ -588,11 +596,15 @@ public:
                 max_fd = std::max(max_fd, item.first);
             }
 
-            const int ready = select(max_fd + 1, &read_fds, &write_fds, nullptr, nullptr);
+            timeval timeout;
+            timeval* timeout_ptr = select_timeout(timeout);
+            const int ready = select(max_fd + 1, &read_fds, &write_fds, nullptr, timeout_ptr);
             if (ready == -1) {
                 if (errno == EINTR) continue;
                 throw std::runtime_error("select failed: " + std::string(std::strerror(errno)));
             }
+
+            remove_stalled_web_clients();
 
             if (FD_ISSET(ws_listen_fd_, &read_fds)) accept_web_clients();
             if (FD_ISSET(tcp_listen_fd_, &read_fds)) accept_tcp_clients();
@@ -626,6 +638,35 @@ private:
             if (item.second.handshaken) ++count;
         }
         return count;
+    }
+
+    timeval* select_timeout(timeval& timeout) const {
+        std::optional<std::chrono::steady_clock::time_point> nearest;
+        for (const auto& item : web_clients_) {
+            if (item.second.send_deadline && (!nearest || *item.second.send_deadline < *nearest)) {
+                nearest = item.second.send_deadline;
+            }
+        }
+        if (!nearest) return nullptr;
+
+        const auto remaining = std::max(
+            std::chrono::steady_clock::duration::zero(),
+            *nearest - std::chrono::steady_clock::now());
+        const auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(remaining);
+        timeout.tv_sec = static_cast<decltype(timeout.tv_sec)>(microseconds.count() / 1000000);
+        timeout.tv_usec = static_cast<decltype(timeout.tv_usec)>(microseconds.count() % 1000000);
+        return &timeout;
+    }
+
+    void remove_stalled_web_clients() {
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<int> stalled;
+        for (const auto& item : web_clients_) {
+            if (item.second.send_deadline && now >= *item.second.send_deadline) {
+                stalled.push_back(item.first);
+            }
+        }
+        for (int fd : stalled) remove_web(fd);
     }
 
     void accept_web_clients() {
@@ -819,8 +860,15 @@ private:
 
     void flush_web(int fd) {
         WebClient& client = web_clients_[fd];
+        const std::size_t pending = client.output.size();
         flush_output(fd, client.output);
-        if (client.fd == -1) remove_web(fd);
+        if (client.fd == -1) {
+            remove_web(fd);
+        } else if (client.output.empty()) {
+            client.send_deadline.reset();
+        } else if (client.output.size() < pending) {
+            client.send_deadline = std::chrono::steady_clock::now() + WEBSOCKET_SEND_TIMEOUT;
+        }
     }
 
     void flush_tcp(int fd) {

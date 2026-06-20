@@ -177,7 +177,33 @@ class Pallet:
                 f"could not connect to bridge TCP server at {self.host}:{self.port}: {exc}"
             ) from exc
         self._file = self._sock.makefile("r", encoding="utf-8", newline="\n")
-        hello = self._read_response()
+
+        # Ask for status before waiting for a response.  Current bridges send
+        # an unsolicited greeting first, while older bridges wait for the TCP
+        # client to send its first command.  Sending the request up front
+        # supports both protocols and avoids a command-first/response-first
+        # deadlock between mixed deployments.
+        payload = json.dumps(
+            {"type": "__pallet_get_status"}, separators=(",", ":")
+        ).encode("utf-8") + b"\n"
+        self._sock.sendall(payload)
+
+        try:
+            hello = self._read_response()
+            if hello.get("status") == "connected":
+                # Consume the response to the status request after the modern
+                # bridge's unsolicited greeting, so it cannot be mistaken for
+                # the acknowledgement of the first drawing command.
+                hello = self._read_response()
+        except ConnectionError:
+            self.close()
+            raise
+        except (OSError, TimeoutError) as exc:
+            self.close()
+            raise ConnectionError(
+                f"connected to {self.host}:{self.port}, but the service did not "
+                "complete the web pallet bridge handshake"
+            ) from exc
         if hello.get("status") == "no_web_clients":
             self.close()
             raise ConnectionError("bridge is running, but no browser pallet is connected")
@@ -326,10 +352,20 @@ class Pallet:
     def _read_json_line(self) -> dict[str, Any]:
         if self._file is None:
             return {}
-        line = self._file.readline()
-        if not line:
-            raise ConnectionError("bridge closed the TCP connection")
-        return json.loads(line)
+        while True:
+            line = self._file.readline()
+            if not line:
+                raise ConnectionError("bridge closed the TCP connection")
+            if not line.strip():
+                continue
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError as exc:
+                preview = line[:200].rstrip("\r\n")
+                raise ConnectionError(
+                    f"service at {self.host}:{self.port} returned a non-JSON "
+                    f"bridge response: {preview!r}"
+                ) from exc
 
     def subscribe_events(self) -> dict[str, Any]:
         if self._events_subscribed:

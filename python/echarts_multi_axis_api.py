@@ -6,13 +6,15 @@ pallet.
 Run:
     1. python bridge.py
     2. Open pallet.html and connect it to ws://localhost:8080
-    3. python echarts_multi_axis_api.py
+    3. python echarts_multi_axis_api.py --bridge-port 9001
 """
 
+import argparse
 import math
 import time
 
 from echarts_graph_lib import EChartsPallet
+from pallet import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT
 
 
 PAGE = "multi-axis"
@@ -22,10 +24,10 @@ def simple_2x2y_example(pallet: EChartsPallet):
     # Shortest API for the common case: 2 x axes and 2 y axes.
     return pallet.line_chart_2x2y(
         id="simple_2x2y",
-        x=30,
+        x=20,
         y=30,
-        width=1050,
-        height=500,
+        width=590,
+        height=480,
         title="Simple 2 X / 2 Y Line Chart",
 
         bottom_x=["0s", "1s", "2s", "3s", "4s", "5s"],
@@ -52,10 +54,10 @@ def builder_example(pallet: EChartsPallet):
     # Builder API for arbitrary multi-axis line charts.
     chart = pallet.multi_axis_line_chart(
         id="builder_multi_axis",
-        x=30,
-        y=560,
-        width=1050,
-        height=500,
+        x=630,
+        y=30,
+        width=590,
+        height=480,
         title="Builder API Multi-Axis Chart",
         data_zoom=True,
         page=PAGE,
@@ -88,8 +90,20 @@ def builder_example(pallet: EChartsPallet):
 
 
 def main():
-    pallet = EChartsPallet()
-    pallet.start()
+    parser = argparse.ArgumentParser(description="ECharts multi-axis API examples")
+    parser.add_argument("host", nargs="?", default=None, help="bridge TCP host")
+    parser.add_argument("--bridge-host", default=DEFAULT_BRIDGE_HOST, help="bridge TCP host or IP address")
+    parser.add_argument("--bridge-port", type=int, default=DEFAULT_BRIDGE_PORT, help="bridge TCP port")
+    parser.add_argument("--port", type=int, default=None, help="alias for --bridge-port")
+    parser.add_argument("--timeout", type=float, default=5.0, help="bridge connection timeout in seconds")
+    args = parser.parse_args()
+
+    bridge_host = args.host or args.bridge_host
+    bridge_port = args.port if args.port is not None else args.bridge_port
+    print(f"Connecting to bridge TCP server at {bridge_host}:{bridge_port}")
+
+    pallet = EChartsPallet(host=bridge_host, port=bridge_port)
+    pallet.start(timeout=args.timeout)
     pallet.clear(color="#0f172a", page=PAGE)
 
     simple_2x2y_example(pallet)
@@ -97,14 +111,21 @@ def main():
 
     pallet.gauge(
         id="cpu",
-        x=1120,
+        x=1240,
         y=30,
-        width=360,
+        width=240,
         height=320,
         title="CPU Load",
         value=35,
         units="%",
         page=PAGE,
+        extra_series={
+            "detail": {
+                "valueAnimation": True,
+                "formatter": "{value}%",
+                "fontSize": 18,
+            },
+        },
     )
 
     pallet.show_page(PAGE)

@@ -10,23 +10,37 @@ Run bridge.py, open pallet.html and connect it, then run:
 Chart commands are sent through the existing bridge TCP connection.
 """
 
+import argparse
 import math
 import time
 
 from echarts_graph_lib import EChartsPallet
+from pallet import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT
 
 
 def main():
-    pallet = EChartsPallet()
-    pallet.start()
+    parser = argparse.ArgumentParser(description="Apache ECharts pallet examples")
+    parser.add_argument("host", nargs="?", default=None, help="bridge TCP host")
+    parser.add_argument("--bridge-host", default=DEFAULT_BRIDGE_HOST, help="bridge TCP host or IP address")
+    parser.add_argument("--bridge-port", type=int, default=DEFAULT_BRIDGE_PORT, help="bridge TCP port")
+    parser.add_argument("--port", type=int, default=None, help="alias for --bridge-port")
+    parser.add_argument("--timeout", type=float, default=5.0, help="bridge connection timeout in seconds")
+    args = parser.parse_args()
+
+    bridge_host = args.host or args.bridge_host
+    bridge_port = args.port if args.port is not None else args.bridge_port
+    print(f"Connecting to bridge TCP server at {bridge_host}:{bridge_port}")
+
+    pallet = EChartsPallet(host=bridge_host, port=bridge_port)
+    pallet.start(timeout=args.timeout)
     pallet.clear(color="#0f172a")
 
     pallet.progress_gauge(
         id="voltage",
         x=24,
         y=24,
-        width=360,
-        height=320,
+        width=180,
+        height=180,
         title="Supply Voltage",
         name="Voltage",
         value=12.4,
