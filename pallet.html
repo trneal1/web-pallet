@@ -109,6 +109,13 @@
 
     .chart-region.hidden { display: none; }
 
+    .chart-region.in-card {
+      left: auto !important;
+      position: relative;
+      top: auto !important;
+      width: 100% !important;
+    }
+
     .chart-titlebar {
       align-items: center;
       background: rgba(15, 23, 42, 0.88);
@@ -646,6 +653,12 @@
       const region = document.createElement("article");
       region.className = "chart-region";
       region.dataset.chartId = id;
+      const cardId = command.card == null ? null : String(command.card);
+      const card = cardId === null ? null : uiCards.get(cardId);
+      if (cardId !== null && !card) {
+        return console.warn(`Unknown card for chart ${id}:`, cardId);
+      }
+      if (card) region.classList.add("in-card");
       if (command.hidden === true) region.classList.add("hidden");
       if (command.titlebar || command.showTitlebar) region.classList.add("show-titlebar");
       chartRegionStyle(region, { x: 0, y: 0, width: 640, height: 360, ...command });
@@ -655,7 +668,7 @@
       const canvasHost = document.createElement("div");
       canvasHost.className = "chart-canvas";
       region.append(titlebar, canvasHost);
-      chartLayer.appendChild(region);
+      (card ? card.body : chartLayer).appendChild(region);
       const chart = window.echarts.init(canvasHost, command.theme || null, {
         renderer: command.renderer || "canvas",
         useDirtyRect: command.useDirtyRect !== false

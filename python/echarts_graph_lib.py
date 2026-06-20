@@ -205,6 +205,7 @@ class MultiAxisLineChart:
         titlebar: Optional[Union[str, bool]] = None,
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
         animation: bool = True,
         tooltip: bool = True,
         data_zoom: bool = False,
@@ -220,6 +221,7 @@ class MultiAxisLineChart:
         self.titlebar = titlebar if titlebar is not None else title
         self.page = page
         self.group = group
+        self.card = card
         self.animation = animation
         self.tooltip = tooltip
         self.data_zoom = data_zoom
@@ -356,6 +358,7 @@ class MultiAxisLineChart:
             option=self.option(),
             page=self.page,
             group=self.group,
+            card=self.card,
         )
         return self.handle
 
@@ -537,6 +540,49 @@ class EChartsPallet:
             "global": global_name,
         }), remember=remember)
 
+    def define_grid(
+        self,
+        id: str = "default",
+        *,
+        x: int = 0,
+        y: int = 0,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        columns: int = 2,
+        gap: int = 12,
+        padding: int = 12,
+        page: Optional[str] = None,
+        group: Optional[str] = None,
+    ) -> None:
+        """Define a DOM grid that can contain cards and card-hosted charts."""
+        self.send(_clean_dict({
+            "type": "ui_grid", "id": id, "x": x, "y": y,
+            "width": width, "height": height, "columns": columns,
+            "gap": gap, "padding": padding, "page": page, "group": group,
+        }))
+
+    def define_card(
+        self,
+        id: str,
+        *,
+        grid: str = "default",
+        title: str = "",
+        column_span: int = 1,
+        row_span: int = 1,
+        background: Optional[str] = None,
+        color: Optional[str] = None,
+        border: Optional[Union[str, bool]] = None,
+        page: Optional[str] = None,
+        group: Optional[str] = None,
+    ) -> None:
+        """Define a card before creating a chart with ``card=id``."""
+        self.send(_clean_dict({
+            "type": "ui_card", "id": id, "grid": grid, "title": title,
+            "columnSpan": column_span, "rowSpan": row_span,
+            "background": background, "color": color, "border": border,
+            "page": page, "group": group,
+        }))
+
     # ------------------------------------------------------------------
     # Generic chart commands
     # ------------------------------------------------------------------
@@ -557,6 +603,7 @@ class EChartsPallet:
         titlebar: Optional[Union[str, bool]] = None,
         background: Optional[str] = None,
         border: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         if title and "title" not in option:
             option = dict(option)
@@ -579,6 +626,7 @@ class EChartsPallet:
             "titlebar": titlebar,
             "background": background,
             "border": border,
+            "card": card,
         }))
 
         return ChartHandle(self, id)
@@ -660,6 +708,7 @@ class EChartsPallet:
         lines: Optional[Sequence[LineSeries]] = None,
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
         data_zoom: bool = False,
         render: bool = False,
         extra_option: Optional[JsonObject] = None,
@@ -678,6 +727,7 @@ class EChartsPallet:
             title=title,
             page=page,
             group=group,
+            card=card,
             data_zoom=data_zoom,
             extra_option=extra_option,
         )
@@ -719,12 +769,13 @@ class EChartsPallet:
         data_zoom: bool = False,
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Compact helper for the common two-X/two-Y line chart case."""
 
         builder = self.multi_axis_line_chart(
             id=id, x=x, y=y, width=width, height=height,
-            title=title, page=page, group=group, data_zoom=data_zoom,
+            title=title, page=page, group=group, card=card, data_zoom=data_zoom,
         )
 
         builder.add_x_axis(bottom_x_name, data=bottom_x, position="bottom")
@@ -769,6 +820,7 @@ class EChartsPallet:
         x_axis_name: Optional[str] = None,
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
         extra_option: Optional[JsonObject] = None,
     ) -> ChartHandle:
         if not y_data:
@@ -811,7 +863,7 @@ class EChartsPallet:
 
         return self.chart(
             id=id, x=x, y=y, width=width, height=height,
-            option=option, title=title, page=page, group=group, titlebar=title,
+            option=option, title=title, page=page, group=group, card=card, titlebar=title,
         )
 
     def gauge(
@@ -830,6 +882,7 @@ class EChartsPallet:
         units: str = "",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
         extra_series: Optional[JsonObject] = None,
         extra_option: Optional[JsonObject] = None,
     ) -> ChartHandle:
@@ -860,7 +913,7 @@ class EChartsPallet:
 
         return self.chart(
             id=id, x=x, y=y, width=width, height=height,
-            option=option, title=title, page=page, group=group, titlebar=title,
+            option=option, title=title, page=page, group=group, card=card, titlebar=title,
         )
 
     def update_gauge(self, id: str, value: float, *, name: str = "Value", series_index: int = 0) -> None:
@@ -881,6 +934,7 @@ class EChartsPallet:
         series_name: str = "Value",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         if horizontal:
             option = {
@@ -902,7 +956,7 @@ class EChartsPallet:
             }
 
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def pie_chart(
@@ -919,6 +973,7 @@ class EChartsPallet:
         radius: Union[str, Sequence[str]] = "65%",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         normalized = []
         for item in data:
@@ -941,7 +996,7 @@ class EChartsPallet:
             }],
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
 
@@ -966,12 +1021,13 @@ class EChartsPallet:
         ring_width: int = 18,
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Progress-ring gauge, similar to the ECharts Progress Gauge example."""
         return self.gauge(
             id=id, x=x, y=y, width=width, height=height,
             title=title, name=name, value=value, min=min, max=max, units=units,
-            page=page, group=group,
+            page=page, group=group, card=card,
             extra_series={
                 "progress": {"show": True, "roundCap": True, "width": ring_width},
                 "pointer": {"show": False},
@@ -1004,6 +1060,7 @@ class EChartsPallet:
         units: str = "%",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Multiple concentric progress gauges.
 
@@ -1046,7 +1103,7 @@ class EChartsPallet:
             "series": series,
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def stacked_line_chart(
@@ -1064,6 +1121,7 @@ class EChartsPallet:
         smooth: bool = False,
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Stacked line / stacked area chart helper."""
         echarts_series = []
@@ -1090,7 +1148,7 @@ class EChartsPallet:
             "series": echarts_series,
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def area_line_chart(
@@ -1108,13 +1166,14 @@ class EChartsPallet:
         smooth: bool = True,
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Area line chart helper."""
         return self.line_chart(
             id=id, x=x, y=y, width=width, height=height,
             x_data=x_data, y_data=y_data, title=title,
             series_names=[name], smooth=smooth, area=True,
-            page=page, group=group,
+            page=page, group=group, card=card,
         )
 
     def stepped_line_chart(
@@ -1132,6 +1191,7 @@ class EChartsPallet:
         step: Union[str, bool] = "middle",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Step line chart helper."""
         option = {
@@ -1143,7 +1203,7 @@ class EChartsPallet:
             "series": [{"name": name, "type": "line", "step": step, "data": list(y_data)}],
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def bar_race_chart(
@@ -1161,6 +1221,7 @@ class EChartsPallet:
         realtime_sort: bool = True,
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Bar-race style horizontal bar chart.
 
@@ -1191,7 +1252,7 @@ class EChartsPallet:
             "animationEasingUpdate": "linear",
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def doughnut_chart(
@@ -1209,13 +1270,14 @@ class EChartsPallet:
         outer_radius: str = "70%",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Doughnut/ring pie chart helper."""
         return self.pie_chart(
             id=id, x=x, y=y, width=width, height=height,
             data=data, title=title, series_name=series_name,
             radius=[inner_radius, outer_radius],
-            page=page, group=group,
+            page=page, group=group, card=card,
         )
 
     def rose_pie_chart(
@@ -1231,6 +1293,7 @@ class EChartsPallet:
         rose_type: str = "radius",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Nightingale/rose pie chart helper."""
         normalized = []
@@ -1254,7 +1317,7 @@ class EChartsPallet:
             }],
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def bubble_scatter_chart(
@@ -1272,6 +1335,7 @@ class EChartsPallet:
         size_name: str = "Size",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Bubble scatter chart. Each point is (x, y, size)."""
         option = {
@@ -1291,7 +1355,7 @@ class EChartsPallet:
             }],
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def heatmap_chart(
@@ -1310,6 +1374,7 @@ class EChartsPallet:
         max_value: Optional[float] = None,
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Heatmap chart helper.
 
@@ -1345,7 +1410,7 @@ class EChartsPallet:
             }],
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def radar_chart(
@@ -1361,6 +1426,7 @@ class EChartsPallet:
         title: str = "",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Radar chart helper."""
         normalized_indicators = []
@@ -1380,7 +1446,7 @@ class EChartsPallet:
             }],
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def candlestick_chart(
@@ -1396,6 +1462,7 @@ class EChartsPallet:
         title: str = "",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Candlestick chart helper. ohlc rows are [open, close, low, high]."""
         option = {
@@ -1408,7 +1475,7 @@ class EChartsPallet:
             "series": [{"type": "candlestick", "data": [list(row) for row in ohlc]}],
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def funnel_chart(
@@ -1423,6 +1490,7 @@ class EChartsPallet:
         title: str = "",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Funnel chart helper."""
         normalized = []
@@ -1448,7 +1516,7 @@ class EChartsPallet:
             }],
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
     def treemap_chart(
@@ -1463,6 +1531,7 @@ class EChartsPallet:
         title: str = "",
         page: Optional[str] = None,
         group: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> ChartHandle:
         """Treemap chart helper."""
         option = {
@@ -1476,7 +1545,7 @@ class EChartsPallet:
             }],
         }
         return self.chart(id=id, x=x, y=y, width=width, height=height,
-                          option=option, title=title, page=page, group=group,
+                          option=option, title=title, page=page, group=group, card=card,
                           titlebar=title)
 
 
