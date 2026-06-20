@@ -88,6 +88,55 @@
       position: absolute;
     }
 
+    #chartLayer {
+      inset: 0;
+      overflow: hidden;
+      pointer-events: none;
+      position: absolute;
+    }
+
+    .chart-region {
+      background: white;
+      border: 1px solid #cbd5e1;
+      border-radius: 0.75rem;
+      box-shadow: 0 4px 18px rgba(15, 23, 42, 0.13);
+      min-height: 32px;
+      min-width: 32px;
+      overflow: hidden;
+      pointer-events: auto;
+      position: absolute;
+    }
+
+    .chart-region.hidden { display: none; }
+
+    .chart-titlebar {
+      align-items: center;
+      background: rgba(15, 23, 42, 0.88);
+      color: #f8fafc;
+      display: none;
+      font-size: 0.82rem;
+      font-weight: 700;
+      height: 2rem;
+      inset: 0 0 auto;
+      padding: 0 0.65rem;
+      position: absolute;
+      z-index: 2;
+    }
+
+    .chart-region.show-titlebar .chart-titlebar { display: flex; }
+
+    .chart-canvas {
+      height: 100%;
+      inset: 0;
+      position: absolute;
+      width: 100%;
+    }
+
+    .chart-region.show-titlebar .chart-canvas {
+      height: calc(100% - 2rem);
+      top: 2rem;
+    }
+
     .pallet-grid {
       box-sizing: border-box;
       display: grid;
@@ -291,15 +340,18 @@
 
   <main>
     <canvas id="canvas"></canvas>
+    <div id="chartLayer"></div>
     <div id="uiLayer"></div>
     <div id="terminalLayer"></div>
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
   <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
   <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
   <script>
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
+    const chartLayer = document.getElementById("chartLayer");
     const terminalLayer = document.getElementById("terminalLayer");
     const uiLayer = document.getElementById("uiLayer");
     const urlInput = document.getElementById("url");
@@ -333,6 +385,8 @@
     let uiControls = new Map();
     let uiTables = new Map();
     let uiStatuses = new Map();
+    let charts = new Map();
+    const loadedScripts = new Map();
     const maxReconnectDelay = 10000;
 
     function resizeCanvas() {
@@ -358,7 +412,8 @@
         screen_width: window.screen.width,
         screen_height: window.screen.height,
         screen_avail_width: window.screen.availWidth,
-        screen_avail_height: window.screen.availHeight
+        screen_avail_height: window.screen.availHeight,
+        echarts_version: window.echarts?.version || null
       };
     }
 
@@ -379,6 +434,13 @@
       terminalRegions = new Map();
       resetXtermRegions();
       resetUiLayer();
+      resetCharts();
+    }
+
+    function resetCharts() {
+      for (const state of charts.values()) state.chart.dispose();
+      charts = new Map();
+      chartLayer.replaceChildren();
     }
 
     function resetUiLayer() {
@@ -558,6 +620,126 @@
       }
     }
 
+    function chartRegionStyle(element, command) {
+      for (const name of ["x", "y", "width", "height"]) {
+        if (command[name] == null) continue;
+        const minimum = name === "width" || name === "height" ? 32 : 0;
+        element.style[name === "x" ? "left" : name === "y" ? "top" : name] =
+          `${Math.max(minimum, Math.round(command[name]))}px`;
+      }
+      if (command.z != null) element.style.zIndex = String(command.z);
+      if (command.background) element.style.background = command.background;
+      if (command.border === false) element.style.border = "0";
+      else if (command.border) element.style.border = command.border;
+      if (command.radius != null) element.style.borderRadius = `${Math.max(0, Math.round(command.radius))}px`;
+      if (command.shadow === false) element.style.boxShadow = "none";
+    }
+
+    function defineChart(command) {
+      if (!window.echarts) return console.error("ECharts is not loaded; cannot create chart", command.id);
+      const id = String(command.id || "chart");
+      const existing = charts.get(id);
+      if (existing) {
+        existing.chart.dispose();
+        existing.region.remove();
+      }
+      const region = document.createElement("article");
+      region.className = "chart-region";
+      region.dataset.chartId = id;
+      if (command.hidden === true) region.classList.add("hidden");
+      if (command.titlebar || command.showTitlebar) region.classList.add("show-titlebar");
+      chartRegionStyle(region, { x: 0, y: 0, width: 640, height: 360, ...command });
+      const titlebar = document.createElement("div");
+      titlebar.className = "chart-titlebar";
+      titlebar.textContent = String(command.titlebar || command.title || id);
+      const canvasHost = document.createElement("div");
+      canvasHost.className = "chart-canvas";
+      region.append(titlebar, canvasHost);
+      chartLayer.appendChild(region);
+      const chart = window.echarts.init(canvasHost, command.theme || null, {
+        renderer: command.renderer || "canvas",
+        useDirtyRect: command.useDirtyRect !== false
+      });
+      charts.set(id, { region, titlebar, canvasHost, chart });
+      const eventNames = Array.isArray(command.events)
+        ? command.events
+        : ["click", "dblclick", "mouseover", "mouseout", "legendselectchanged", "datazoom"];
+      for (const eventName of eventNames) {
+        chart.on(eventName, (params) => {
+          if (!socket || socket.readyState !== WebSocket.OPEN) return;
+          socket.send(JSON.stringify({
+            type: "__pallet_chart_event", id, event: eventName,
+            ...(displayPageKey !== null ? { page: displayPageKey } : {}),
+            name: params?.name, seriesName: params?.seriesName,
+            seriesIndex: params?.seriesIndex, dataIndex: params?.dataIndex,
+            value: params?.value, componentType: params?.componentType
+          }));
+        });
+      }
+      if (command.option) setChartOption(command);
+      chart.resize();
+    }
+
+    function setChartOption(command) {
+      const state = charts.get(String(command.id || "chart"));
+      if (!state) return console.warn("Unknown chart:", command.id || "chart");
+      state.chart.setOption(command.option || {}, {
+        notMerge: command.notMerge === true || command.merge === false,
+        lazyUpdate: command.lazyUpdate === true,
+        replaceMerge: command.replaceMerge
+      });
+    }
+
+    function setChartData(command, append = false) {
+      const state = charts.get(String(command.id || "chart"));
+      if (!state) return console.warn("Unknown chart:", command.id || "chart");
+      const series = {};
+      if (command.seriesId != null) series.id = command.seriesId;
+      else if (command.seriesName != null) series.name = command.seriesName;
+      else series.seriesIndex = Number(command.seriesIndex ?? 0);
+      if (append) state.chart.appendData({ ...series, data: command.data || [] });
+      else state.chart.setOption({ series: [{ ...series, data: command.data || [] }] }, { lazyUpdate: command.lazyUpdate === true });
+    }
+
+    function resizeChart(command) {
+      const state = charts.get(String(command.id || "chart"));
+      if (!state) return;
+      chartRegionStyle(state.region, command);
+      state.chart.resize();
+    }
+
+    function removeChart(command) {
+      const id = String(command.id || "chart");
+      const state = charts.get(id);
+      if (!state) return;
+      state.chart.dispose();
+      state.region.remove();
+      charts.delete(id);
+    }
+
+    function showHideChart(command, hidden) {
+      const state = charts.get(String(command.id || "chart"));
+      if (!state) return;
+      state.region.classList.toggle("hidden", hidden);
+      if (!hidden) requestAnimationFrame(() => state.chart.resize());
+    }
+
+    function loadChartScript(command) {
+      const url = String(command.url || "");
+      if (!url || loadedScripts.has(url)) return;
+      const script = document.createElement("script");
+      loadedScripts.set(url, script);
+      script.src = url;
+      script.async = true;
+      script.onload = () => {
+        if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "__pallet_script_loaded", url }));
+      };
+      script.onerror = () => {
+        if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "__pallet_script_error", url }));
+      };
+      document.head.appendChild(script);
+    }
+
     function drawCommand(command, remember = true) {
       const pageKey = getCommandPageKey(command);
       if (command.type === "__pallet_client_disconnected") {
@@ -576,6 +758,11 @@
 
       if (command.type === "__pallet_replace_group" || command.type === "group_replace") {
         replaceCommandGroup(command);
+        return;
+      }
+
+      if (command.type === "script_load") {
+        loadChartScript(command);
         return;
       }
 
@@ -661,6 +848,50 @@
 
         case "ui_table_update": {
           updateUiTable(command);
+          break;
+        }
+
+        case "chart_define":
+        case "chart_create": {
+          defineChart(command);
+          break;
+        }
+
+        case "chart_option":
+        case "chart_set_option": {
+          setChartOption(command);
+          break;
+        }
+
+        case "chart_data": {
+          setChartData(command, command.append === true);
+          break;
+        }
+
+        case "chart_append": {
+          setChartData(command, true);
+          break;
+        }
+
+        case "chart_resize":
+        case "chart_move": {
+          resizeChart(command);
+          break;
+        }
+
+        case "chart_remove":
+        case "chart_delete": {
+          removeChart(command);
+          break;
+        }
+
+        case "chart_show": {
+          showHideChart(command, false);
+          break;
+        }
+
+        case "chart_hide": {
+          showHideChart(command, true);
           break;
         }
 

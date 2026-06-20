@@ -38,6 +38,7 @@ async def websocket_handler(websocket):
                     "screen_height": command.get("screen_height"),
                     "screen_avail_width": command.get("screen_avail_width"),
                     "screen_avail_height": command.get("screen_avail_height"),
+                    "echarts_version": command.get("echarts_version"),
                 }
             elif (
                 isinstance(command, dict)
@@ -46,6 +47,9 @@ async def websocket_handler(websocket):
                     "__pallet_xterm_input",
                     "__pallet_xterm_resize",
                     "__pallet_ui_event",
+                    "__pallet_chart_event",
+                    "__pallet_script_loaded",
+                    "__pallet_script_error",
                 }
             ):
                 await publish_tcp_event(command)

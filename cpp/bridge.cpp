@@ -184,6 +184,11 @@ bool looks_like_json_object(const std::string& json) {
     return value.size() >= 2 && value.front() == '{' && value.back() == '}';
 }
 
+bool looks_like_json_array(const std::string& json) {
+    const std::string value = trim(json);
+    return value.size() >= 2 && value.front() == '[' && value.back() == ']';
+}
+
 std::string extract_json_string(const std::string& json, const std::string& key) {
     const std::string pattern = "\"" + key + "\"";
     std::size_t pos = json.find(pattern);
@@ -492,8 +497,10 @@ std::optional<std::string> pop_websocket_message(std::string& buffer, bool& clos
 
 std::string browser_status_fields_json(const std::map<int, WebClient>& web_clients) {
     std::vector<const BrowserStatus*> browsers;
+    std::size_t connected_clients = 0;
     for (const auto& item : web_clients) {
         if (!item.second.handshaken) continue;
+        ++connected_clients;
         const auto width = item.second.status.values.find("canvas_width");
         const auto height = item.second.status.values.find("canvas_height");
         if (width != item.second.status.values.end() && height != item.second.status.values.end() &&
@@ -503,7 +510,7 @@ std::string browser_status_fields_json(const std::map<int, WebClient>& web_clien
     }
 
     std::ostringstream out;
-    out << "\"web_clients\":" << web_clients.size() << ",\"browsers\":[";
+    out << "\"web_clients\":" << connected_clients << ",\"browsers\":[";
     for (std::size_t i = 0; i < browsers.size(); ++i) {
         if (i) out << ",";
         out << "{";
@@ -613,6 +620,14 @@ private:
     std::map<int, WebClient> web_clients_;
     std::map<int, TcpClient> tcp_clients_;
 
+    std::size_t web_client_count() const {
+        std::size_t count = 0;
+        for (const auto& item : web_clients_) {
+            if (item.second.handshaken) ++count;
+        }
+        return count;
+    }
+
     void accept_web_clients() {
         while (true) {
             int fd = accept(ws_listen_fd_, nullptr, nullptr);
@@ -641,7 +656,7 @@ private:
             client.peer = peer_name(fd);
             std::cout << "TCP client connected: " << client.peer << "\n";
 
-            const bool connected = !web_clients_.empty();
+            const bool connected = web_client_count() > 0;
             queue_tcp_json(client, "{\"status\":\"" + std::string(connected ? "connected" : "no_web_clients") +
                                    "\"," + browser_status_fields_json(web_clients_) + "}");
             if (!connected) client.close_after_write = true;
@@ -708,7 +723,7 @@ private:
             static const std::vector<std::string> keys = {
                 "canvas_width", "canvas_height", "css_width", "css_height", "device_pixel_ratio",
                 "max_css_width", "max_css_height", "screen_width", "screen_height",
-                "screen_avail_width", "screen_avail_height",
+                "screen_avail_width", "screen_avail_height", "echarts_version",
             };
             BrowserStatus status;
             for (const std::string& key : keys) status.values[key] = extract_json_value(message, key);
@@ -716,7 +731,10 @@ private:
         } else if (type == "__pallet_terminal_input" ||
                    type == "__pallet_xterm_input" ||
                    type == "__pallet_xterm_resize" ||
-                   type == "__pallet_ui_event") {
+                   type == "__pallet_ui_event" ||
+                   type == "__pallet_chart_event" ||
+                   type == "__pallet_script_loaded" ||
+                   type == "__pallet_script_error") {
             publish_tcp_event(message);
         }
     }
@@ -756,12 +774,14 @@ private:
 
     void handle_tcp_line(int fd, const std::string& line) {
         TcpClient& client = tcp_clients_[fd];
-        if (!looks_like_json_object(line)) {
-            queue_tcp_json(client, "{\"status\":\"error\",\"message\":\"invalid JSON object\"}");
+        const bool is_object = looks_like_json_object(line);
+        const bool is_array = looks_like_json_array(line);
+        if (!is_object && !is_array) {
+            queue_tcp_json(client, "{\"status\":\"error\",\"message\":\"invalid JSON command\"}");
             return;
         }
 
-        const std::string type = extract_json_string(line, "type");
+        const std::string type = is_object ? extract_json_string(line, "type") : std::string();
         if (type == "__pallet_subscribe_events") {
             client.subscribed = true;
             queue_tcp_json(client, "{\"status\":\"ok\",\"events\":\"subscribed\"}");
@@ -773,13 +793,14 @@ private:
             return;
         }
 
-        if (web_clients_.empty()) {
+        const std::size_t connected_clients = web_client_count();
+        if (connected_clients == 0) {
             queue_tcp_json(client, "{\"status\":\"no_web_clients\"}");
             return;
         }
 
         broadcast(line);
-        queue_tcp_json(client, "{\"status\":\"ok\",\"web_clients\":" + std::to_string(web_clients_.size()) + "}");
+        queue_tcp_json(client, "{\"status\":\"ok\",\"web_clients\":" + std::to_string(connected_clients) + "}");
     }
 
     void broadcast(const std::string& command) {
@@ -836,7 +857,7 @@ private:
         const std::string peer = it->second.peer;
         close_fd(it->second.fd);
         tcp_clients_.erase(it);
-        if (!web_clients_.empty()) {
+        if (web_client_count() > 0) {
             broadcast("{\"type\":\"__pallet_client_disconnected\",\"client\":" + q(peer) + "}");
         }
         std::cout << "TCP client disconnected: " << peer << "\n";
