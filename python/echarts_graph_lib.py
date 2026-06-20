@@ -916,8 +916,16 @@ class EChartsPallet:
             option=option, title=title, page=page, group=group, card=card, titlebar=title,
         )
 
-    def update_gauge(self, id: str, value: float, *, name: str = "Value", series_index: int = 0) -> None:
-        self.set_data(id, [{"value": value, "name": name}], series_index=series_index)
+    def update_gauge(
+        self,
+        id: str,
+        value: float,
+        *,
+        name: str = "Value",
+        series_index: int = 0,
+        page: Optional[str] = None,
+    ) -> None:
+        self.set_data(id, [{"value": value, "name": name}], series_index=series_index, page=page)
 
     def bar_chart(
         self,
