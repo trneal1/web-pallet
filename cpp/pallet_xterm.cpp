@@ -14,6 +14,7 @@
  * Run:
  *
  *     ./pallet_xterm --id shell --clear --title "Shell"
+ *     ./pallet_xterm --id monitor --display-only --command "top -d 2"
  *
  * This starts a real shell under a Linux pseudoterminal. Full-screen programs
  * such as vi, nano, top, less, and htop can use cursor movement and raw keys.
@@ -59,6 +60,8 @@ struct Args {
     int width = 820;
     int height = 420;
     int font_size = 14;
+    bool display_only = false;
+    std::optional<std::string> command;
     std::string title = "Pallet Shell";
     std::string background = "#020617";
     std::string text_color = "#E5E7EB";
@@ -96,6 +99,9 @@ struct XtermEvent {
         << "  --width N               region width (default: 820)\n"
         << "  --height N              region height (default: 420)\n"
         << "  --font-size N           terminal font size (default: 14)\n"
+        << "  --display-only          ignore keyboard input from pallet.html\n"
+        << "  --one-directional       alias for --display-only\n"
+        << "  --command COMMAND       run COMMAND instead of an interactive shell\n"
         << "  --title TEXT            region title metadata (default: Pallet Shell)\n"
         << "  --background COLOR      region background color (default: #020617)\n"
         << "  --text-color COLOR      region text color (default: #E5E7EB)\n"
@@ -171,6 +177,10 @@ Args parse_args(int argc, char* argv[]) {
             args.height = parse_int(take_value(i, argc, argv, arg), arg);
         } else if (arg == "--font-size") {
             args.font_size = parse_int(take_value(i, argc, argv, arg), arg);
+        } else if (arg == "--display-only" || arg == "--one-directional") {
+            args.display_only = true;
+        } else if (arg == "--command") {
+            args.command = take_value(i, argc, argv, arg);
         } else if (arg == "--title") {
             args.title = take_value(i, argc, argv, arg);
         } else if (arg == "--background") {
@@ -404,6 +414,7 @@ public:
             << ",\"color\":" << q(args.text_color)
             << ",\"border\":\"#334155\""
             << ",\"fontSize\":" << args.font_size
+            << ",\"inputEnabled\":" << (args.display_only ? "false" : "true")
             << ",\"scrollback\":2000"
             << "}";
         return cmd.str();
@@ -563,7 +574,9 @@ private:
         if (event.id != args.id || !matches_page(event, args)) return false;
 
         if (event.type == XtermEvent::Type::Input) {
-            write_all(pty_fd, event.data);
+            if (!args.display_only) {
+                write_all(pty_fd, event.data);
+            }
             return true;
         }
 
@@ -598,7 +611,9 @@ private:
                     continue;
                 }
                 if (event.type == XtermEvent::Type::Input) {
-                    write_all(pty_fd, event.data);
+                    if (!args.display_only) {
+                        write_all(pty_fd, event.data);
+                    }
                 } else if (event.type == XtermEvent::Type::Resize) {
                     resize_pty(pty_fd, event.cols, event.rows);
                 }
@@ -609,7 +624,7 @@ private:
     }
 };
 
-pid_t spawn_shell(int& pty_fd, int cols, int rows) {
+pid_t spawn_shell(int& pty_fd, int cols, int rows, const std::optional<std::string>& command) {
     winsize ws {};
     ws.ws_col = static_cast<unsigned short>(std::max(2, cols));
     ws.ws_row = static_cast<unsigned short>(std::max(2, rows));
@@ -623,6 +638,11 @@ pid_t spawn_shell(int& pty_fd, int cols, int rows) {
         ::setenv("TERM", "xterm-256color", 1);
         const char* shell = std::getenv("SHELL");
         if (!shell || !*shell) shell = "/bin/bash";
+        if (command) {
+            ::execlp(shell, shell, "-c", command->c_str(), static_cast<char*>(nullptr));
+            ::execlp("/bin/sh", "sh", "-c", command->c_str(), static_cast<char*>(nullptr));
+            _exit(127);
+        }
         ::execlp(shell, shell, static_cast<char*>(nullptr));
         ::execlp("/bin/sh", "sh", static_cast<char*>(nullptr));
         _exit(127);
@@ -679,7 +699,7 @@ int main(int argc, char* argv[]) {
 
         const int approx_cols = std::max(2, (args.width - 10) / std::max(6, static_cast<int>(std::round(args.font_size * 0.62))));
         const int approx_rows = std::max(2, (args.height - 10) / std::max(10, static_cast<int>(std::round(args.font_size * 1.15))));
-        child_pid = spawn_shell(pty_fd, approx_cols, approx_rows);
+        child_pid = spawn_shell(pty_fd, approx_cols, approx_rows, args.command);
 
         PalletConnection pallet(args.bridge_host, bridge_port, args.timeout);
         pallet.connect();

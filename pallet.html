@@ -33,7 +33,41 @@
       display: none;
     }
 
+    #quickPageControls {
+      display: none;
+      position: fixed;
+      right: 0.75rem;
+      top: 0.75rem;
+      z-index: 1000;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.3rem;
+      border: 1px solid #4b5563;
+      border-radius: 0.65rem;
+      background: rgba(31, 41, 55, 0.9);
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+    }
+
+    body.settings-hidden.quick-pages-visible #quickPageControls {
+      display: flex;
+    }
+
+    #quickPageControls button {
+      min-width: 2rem;
+      padding: 0.35rem 0.55rem;
+    }
+
+    #quickPageSelect {
+      flex: 0 0 8rem;
+      min-width: 0;
+      padding: 0.35rem 0.5rem;
+    }
+
     #showSettings {
+      background: #4b5563;
+    }
+
+    #openQuickPages {
       display: none;
       position: fixed;
       right: 0.75rem;
@@ -49,7 +83,7 @@
       font-size: 1.15rem;
     }
 
-    body.settings-hidden #showSettings {
+    body.settings-hidden:not(.quick-pages-visible) #openQuickPages {
       display: block;
     }
 
@@ -380,7 +414,16 @@
     <button id="hideSettings" type="button" title="Hide settings" aria-label="Hide settings">▲</button>
   </header>
 
-  <button id="showSettings" type="button" title="Show settings" aria-label="Show settings">⚙</button>
+  <button id="openQuickPages" type="button" title="Pages" aria-label="Open page selector">⚙</button>
+  <div id="quickPageControls" aria-label="Quick page navigation">
+    <button id="closeQuickPages" type="button" title="Back" aria-label="Close page selector">←</button>
+    <button id="previousPage" type="button" title="Previous page" aria-label="Previous page">‹</button>
+    <select id="quickPageSelect" aria-label="Viewed page">
+      <option value="">Start</option>
+    </select>
+    <button id="nextPage" type="button" title="Next page" aria-label="Next page">›</button>
+    <button id="showSettings" type="button" title="Show settings" aria-label="Show settings">⚙</button>
+  </div>
 
   <main>
     <canvas id="canvas"></canvas>
@@ -401,10 +444,15 @@
     const urlInput = document.getElementById("url");
     const connectButton = document.getElementById("connect");
     const pageSelect = document.getElementById("pageSelect");
+    const quickPageSelect = document.getElementById("quickPageSelect");
+    const previousPageButton = document.getElementById("previousPage");
+    const nextPageButton = document.getElementById("nextPage");
     const deletePageButton = document.getElementById("deletePage");
     const clearButton = document.getElementById("clear");
     const statusText = document.getElementById("status");
     const hideSettingsButton = document.getElementById("hideSettings");
+    const openQuickPagesButton = document.getElementById("openQuickPages");
+    const closeQuickPagesButton = document.getElementById("closeQuickPages");
     const showSettingsButton = document.getElementById("showSettings");
 
     let socket = null;
@@ -460,8 +508,14 @@
 
     function setSettingsVisible(visible) {
       document.body.classList.toggle("settings-hidden", !visible);
+      document.body.classList.remove("quick-pages-visible");
       showSettingsButton.setAttribute("aria-expanded", String(visible));
       refreshViewport();
+    }
+
+    function setQuickPageControlsVisible(visible) {
+      document.body.classList.toggle("quick-pages-visible", visible);
+      openQuickPagesButton.setAttribute("aria-expanded", String(visible));
     }
 
     function getCanvasStatus() {
@@ -567,24 +621,40 @@
 
     function updatePageSelect() {
       const selectedValue = displayPageKey === null ? "" : displayPageKey;
-      const existingValues = new Set(Array.from(pageSelect.options).map((option) => option.value));
+      for (const select of [pageSelect, quickPageSelect]) {
+        const fragment = document.createDocumentFragment();
+        const startOption = document.createElement("option");
+        startOption.value = "";
+        startOption.textContent = "Start";
+        fragment.appendChild(startOption);
 
-      for (const option of Array.from(pageSelect.options)) {
-        if (option.value !== "" && !pageBuffers.has(option.value)) {
-          option.remove();
+        for (const pageKey of pageBuffers.keys()) {
+          const option = document.createElement("option");
+          option.value = pageKey;
+          option.textContent = `Page ${pageKey}`;
+          fragment.appendChild(option);
         }
-      }
 
-      for (const pageKey of pageBuffers.keys()) {
-        if (existingValues.has(pageKey)) continue;
-        const option = document.createElement("option");
-        option.value = pageKey;
-        option.textContent = `Page ${pageKey}`;
-        pageSelect.appendChild(option);
+        select.replaceChildren(fragment);
+        select.value = selectedValue;
       }
-
-      pageSelect.value = selectedValue;
       deletePageButton.disabled = displayPageKey === null;
+    }
+
+    function selectPage(pageKey) {
+      pageKey = normalizePageKey(pageKey);
+      if (pageKey === null) {
+        returnToStartPage();
+      } else {
+        showNamedPage(pageKey);
+      }
+    }
+
+    function cyclePage(direction) {
+      const pages = [null, ...pageBuffers.keys()];
+      const currentIndex = pages.findIndex((pageKey) => pageKey === displayPageKey);
+      const nextIndex = (Math.max(0, currentIndex) + direction + pages.length) % pages.length;
+      selectPage(pages[nextIndex]);
     }
 
     function rememberCommand(command, pageKey = null) {
@@ -892,6 +962,11 @@
 
         case "terminal_xterm_clear": {
           clearXtermRegion(command);
+          break;
+        }
+
+        case "terminal_xterm_font_size": {
+          setXtermFontSize(command);
           break;
         }
 
@@ -1726,6 +1801,7 @@
       const width = Math.max(1, Math.round(command.width || 640));
       const height = Math.max(1, Math.round(command.height || 360));
       const fontSize = Math.max(8, Math.round(command.fontSize || 14));
+      const inputEnabled = command.inputEnabled !== false;
       const lineHeight = Number(command.lineHeight || 1.15);
       const charWidth = Math.max(6, Math.round(fontSize * 0.62));
       const rowHeight = Math.max(10, Math.round(fontSize * lineHeight));
@@ -1746,6 +1822,7 @@
         cols,
         rows,
         cursorBlink: true,
+        disableStdin: !inputEnabled,
         convertEol: false,
         fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
         fontSize,
@@ -1766,9 +1843,10 @@
         cols = terminal.cols;
         rows = terminal.rows;
       }
-      terminal.focus();
+      if (inputEnabled) terminal.focus();
 
       terminal.onData((data) => {
+        if (!inputEnabled) return;
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         socket.send(JSON.stringify({
           type: "__pallet_xterm_input",
@@ -1789,12 +1867,25 @@
         height,
         cols,
         rows,
+        inputEnabled,
         dispose() {
           terminal.dispose();
           element.remove();
         }
       };
       xtermRegions.set(id, region);
+
+      element.title = "Right-click to change terminal font size";
+      element.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const currentSize = region.terminal.options.fontSize;
+        const requestedSize = window.prompt("Terminal font size (8-72 px):", String(currentSize));
+        if (requestedSize === null || requestedSize.trim() === "") return;
+        setXtermFontSize({ id, fontSize: requestedSize });
+      }, true);
+
       sendXtermResize(region);
     }
 
@@ -1810,6 +1901,23 @@
       const region = xtermRegions.get(id);
       if (!region) return;
       region.terminal.clear();
+    }
+
+    function setXtermFontSize(command) {
+      const id = String(command.id || "default");
+      const region = xtermRegions.get(id);
+      if (!region) return;
+
+      const fontSize = Number(command.fontSize);
+      if (!Number.isFinite(fontSize)) return;
+      region.terminal.options.fontSize = Math.min(72, Math.max(8, Math.round(fontSize)));
+
+      if (region.fitAddon) {
+        region.fitAddon.fit();
+        region.cols = region.terminal.cols;
+        region.rows = region.terminal.rows;
+        sendXtermResize(region);
+      }
     }
 
     function sendXtermResize(region) {
@@ -1845,7 +1953,10 @@
         for (const command of commands) {
           drawCommand(command);
         }
-        refreshViewport();
+        // Commands update their own canvas, terminal, UI, or chart target.
+        // A full viewport refresh disposes and recreates every chart, so reserve
+        // that work for actual layout changes such as resize/settings toggles.
+        scheduleCanvasStatus();
       } catch (error) {
         console.error("Invalid JSON drawing message:", event.data, error);
       }
@@ -1935,15 +2046,13 @@
 
     connectButton.addEventListener("click", connect);
     hideSettingsButton.addEventListener("click", () => setSettingsVisible(false));
+    openQuickPagesButton.addEventListener("click", () => setQuickPageControlsVisible(true));
+    closeQuickPagesButton.addEventListener("click", () => setQuickPageControlsVisible(false));
     showSettingsButton.addEventListener("click", () => setSettingsVisible(true));
-    pageSelect.addEventListener("change", () => {
-      const pageKey = normalizePageKey(pageSelect.value);
-      if (pageKey === null) {
-        returnToStartPage();
-      } else {
-        showNamedPage(pageKey);
-      }
-    });
+    pageSelect.addEventListener("change", () => selectPage(pageSelect.value));
+    quickPageSelect.addEventListener("change", () => selectPage(quickPageSelect.value));
+    previousPageButton.addEventListener("click", () => cyclePage(-1));
+    nextPageButton.addEventListener("click", () => cyclePage(1));
     deletePageButton.addEventListener("click", () => {
       deleteNamedPage(displayPageKey);
     });
