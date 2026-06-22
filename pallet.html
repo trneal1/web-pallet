@@ -672,7 +672,40 @@
           targetBuffer.push(command);
         }
       } else {
-        targetBuffer.push(command);
+        let replaced = false;
+        if (command.type === "chart_option" && command.coalesce === true) {
+          for (let index = targetBuffer.length - 1; index >= 0; index -= 1) {
+            const previous = targetBuffer[index];
+            if ((previous.type === "chart_define" || previous.type === "chart_create") &&
+                String(previous.id || "chart") === String(command.id || "chart")) {
+              break;
+            }
+            if (previous.type === "chart_option" && previous.coalesce === true &&
+                String(previous.id || "chart") === String(command.id || "chart")) {
+              targetBuffer[index] = command;
+              replaced = true;
+              break;
+            }
+          }
+        } else if (command.type === "chart_data" && command.append !== true) {
+          const seriesKey = command.seriesId ?? command.seriesName ?? Number(command.seriesIndex ?? 0);
+          for (let index = targetBuffer.length - 1; index >= 0; index -= 1) {
+            const previous = targetBuffer[index];
+            if ((previous.type === "chart_define" || previous.type === "chart_create") &&
+                String(previous.id || "chart") === String(command.id || "chart")) {
+              break;
+            }
+            const previousSeriesKey = previous.seriesId ?? previous.seriesName ?? Number(previous.seriesIndex ?? 0);
+            if (previous.type === "chart_data" &&
+                String(previous.id || "chart") === String(command.id || "chart") &&
+                previousSeriesKey === seriesKey) {
+              targetBuffer[index] = command;
+              replaced = true;
+              break;
+            }
+          }
+        }
+        if (!replaced) targetBuffer.push(command);
         if (pageKey === null && targetIsVisible) {
           displayBuffer = drawingBuffer;
           displayPageKey = null;
@@ -852,7 +885,11 @@
       else if (command.seriesName != null) series.name = command.seriesName;
       else series.seriesIndex = Number(command.seriesIndex ?? 0);
       if (append) state.chart.appendData({ ...series, data: command.data || [] });
-      else state.chart.setOption({ series: [{ ...series, data: command.data || [] }] }, { lazyUpdate: command.lazyUpdate === true });
+      else {
+        const option = { series: [{ ...series, data: command.data || [] }] };
+        if (Array.isArray(command.xAxisData)) option.xAxis = { data: command.xAxisData };
+        state.chart.setOption(option, { lazyUpdate: command.lazyUpdate === true });
+      }
     }
 
     function resizeChart(command) {

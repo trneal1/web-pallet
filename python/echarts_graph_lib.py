@@ -29,8 +29,10 @@ import logging
 import math
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from datetime import datetime
+from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from pallet import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, Pallet
 
@@ -183,6 +185,128 @@ class ChartHandle:
 
     def remove(self) -> None:
         self.pallet.remove_chart(self.id)
+
+
+@dataclass(frozen=True)
+class TimeChartSeries:
+    """One named series in a periodically updated time chart."""
+
+    name: str
+    kind: str = "line"
+    smooth: bool = False
+    color: Optional[str] = None
+    extra: Optional[JsonObject] = None
+
+    def to_echarts(self, data: Sequence[Any]) -> JsonObject:
+        if self.kind not in ("line", "bar"):
+            raise ValueError(f"Time series {self.name!r} kind must be 'line' or 'bar'")
+        series: JsonObject = {
+            "id": self.name,
+            "name": self.name,
+            "type": self.kind,
+            "data": list(data),
+        }
+        if self.kind == "line":
+            series.update({"smooth": self.smooth, "showSymbol": False})
+        else:
+            series["barMaxWidth"] = 28
+        if self.color:
+            series["color"] = self.color
+        if self.extra:
+            series.update(self.extra)
+        return series
+
+
+def _echarts_time_value(value: Union[datetime, int, float]) -> Union[int, float]:
+    """Convert datetimes and Unix seconds to ECharts epoch milliseconds."""
+    if isinstance(value, datetime):
+        return int(value.timestamp() * 1000)
+    if not isinstance(value, (int, float)):
+        raise TypeError("time chart timestamps must be datetime, int, or float values")
+    # time.time() values are seconds; existing millisecond timestamps pass through.
+    return value * 1000 if abs(value) < 100_000_000_000 else value
+
+
+class LiveTimeChart:
+    """Handle for a mixed line/bar chart with a shifting time window."""
+
+    def __init__(
+        self,
+        pallet: "EChartsPallet",
+        *,
+        id: str,
+        series: Sequence[TimeChartSeries],
+        max_points: int,
+        page: Optional[str],
+        time_format: str,
+    ) -> None:
+        if max_points < 2:
+            raise ValueError("max_points must be at least 2")
+        if not series:
+            raise ValueError("at least one time chart series is required")
+        names = [item.name for item in series]
+        if len(names) != len(set(names)):
+            raise ValueError("time chart series names must be unique")
+
+        self.pallet = pallet
+        self.id = id
+        self.series = list(series)
+        self.max_points = max_points
+        self.page = page
+        self.time_format = time_format
+        self._times: Deque[Union[int, float]] = deque(maxlen=max_points)
+        self._data: Dict[str, Deque[Optional[float]]] = {
+            item.name: deque(maxlen=max_points) for item in self.series
+        }
+
+    def _append_local(
+        self,
+        timestamp: Union[datetime, int, float],
+        values: Mapping[str, Optional[float]],
+    ) -> None:
+        unknown = set(values) - set(self._data)
+        if unknown:
+            raise KeyError(f"unknown time chart series: {', '.join(sorted(unknown))}")
+        time_value = _echarts_time_value(timestamp)
+        self._times.append(time_value)
+        for item in self.series:
+            self._data[item.name].append(values.get(item.name))
+
+    def append(
+        self,
+        timestamp: Union[datetime, int, float],
+        values: Mapping[str, Optional[float]],
+    ) -> None:
+        """Append one sample and update only this chart.
+
+        Missing series values become gaps. Once ``max_points`` is reached, the
+        oldest timestamp is dropped and the time axis shifts forward.
+        """
+        self._append_local(timestamp, values)
+        self.pallet.send(_clean_dict({
+            "type": "chart_option",
+            "id": self.id,
+            "option": {
+                "series": [
+                    {
+                        "id": item.name,
+                        "data": list(zip(self._times, self._data[item.name])),
+                    }
+                    for item in self.series
+                ],
+            },
+            "lazyUpdate": False,
+            "coalesce": True,
+            "page": self.page,
+        }))
+
+    update = append
+
+    def option_series(self) -> List[JsonObject]:
+        return [
+            item.to_echarts(list(zip(self._times, self._data[item.name])))
+            for item in self.series
+        ]
 
 
 class MultiAxisLineChart:
@@ -513,8 +637,42 @@ class EChartsPallet:
         if ctype == "clear":
             self._buffer.clear()
             self._buffer.append(command)
-        else:
-            self._buffer.append(command)
+            return
+
+        if ctype == "chart_data" and not command.get("append"):
+            identity = (
+                command.get("page"), command.get("id"), command.get("seriesId"),
+                command.get("seriesName"), command.get("seriesIndex", 0),
+            )
+            for index in range(len(self._buffer) - 1, -1, -1):
+                previous = self._buffer[index]
+                if previous.get("type") == "chart_define" and (
+                    previous.get("page"), previous.get("id")
+                ) == identity[:2]:
+                    break
+                previous_identity = (
+                    previous.get("page"), previous.get("id"), previous.get("seriesId"),
+                    previous.get("seriesName"), previous.get("seriesIndex", 0),
+                )
+                if previous.get("type") == "chart_data" and previous_identity == identity:
+                    self._buffer[index] = command
+                    return
+
+        if ctype == "chart_option" and command.get("coalesce"):
+            identity = (command.get("page"), command.get("id"))
+            for index in range(len(self._buffer) - 1, -1, -1):
+                previous = self._buffer[index]
+                if previous.get("type") == "chart_define" and (
+                    previous.get("page"), previous.get("id")
+                ) == identity:
+                    break
+                if previous.get("type") == "chart_option" and previous.get("coalesce") and (
+                    previous.get("page"), previous.get("id")
+                ) == identity:
+                    self._buffer[index] = command
+                    return
+
+        self._buffer.append(command)
 
     def clear(self, *, color: str = "#0f172a", page: Optional[str] = None) -> None:
         self.send(_clean_dict({"type": "clear", "color": color, "page": page}))
@@ -693,6 +851,99 @@ class EChartsPallet:
     # ------------------------------------------------------------------
     # High-level chart APIs
     # ------------------------------------------------------------------
+
+    def live_time_chart(
+        self,
+        *,
+        id: str,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        series: Union[Mapping[str, str], Sequence[TimeChartSeries]],
+        title: str = "",
+        y_axis_name: str = "",
+        max_points: int = 60,
+        time_format: str = "%H:%M:%S",
+        initial_data: Optional[
+            Sequence[Tuple[Union[datetime, int, float], Mapping[str, Optional[float]]]]
+        ] = None,
+        page: Optional[str] = None,
+        group: Optional[str] = None,
+        card: Optional[str] = None,
+        extra_option: Optional[JsonObject] = None,
+    ) -> LiveTimeChart:
+        """Create a periodically updated chart with a rolling time axis.
+
+        ``series`` may be a mapping such as ``{"Actual": "bar", "Target":
+        "line"}`` or a sequence of :class:`TimeChartSeries` objects. Multiple
+        bar series are grouped side-by-side at each timestamp. Call
+        ``handle.append(timestamp, values)`` to add a sample; after
+        ``max_points`` samples, the oldest point is removed automatically.
+        The time axis automatically chooses rounded label intervals appropriate
+        for the visible window instead of labeling every incoming sample.
+
+        ``group`` is the normal Pallet command group, allowing the chart to be
+        managed together with other commands through ``replace_group``.
+        """
+        if isinstance(series, Mapping):
+            series_specs = [TimeChartSeries(name=name, kind=kind) for name, kind in series.items()]
+        else:
+            series_specs = list(series)
+
+        live_chart = LiveTimeChart(
+            self,
+            id=id,
+            series=series_specs,
+            max_points=max_points,
+            page=page,
+            time_format=time_format,
+        )
+        for timestamp, values in initial_data or []:
+            live_chart._append_local(timestamp, values)
+
+        option: JsonObject = {
+            "title": {"text": title} if title else {},
+            # Rolling categories must move atomically. Animating bars from their
+            # previous category briefly leaves them offset from the new labels.
+            "animationDurationUpdate": 0,
+            "legend": {"top": 34} if len(series_specs) > 1 else {},
+            "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+            "grid": {
+                "left": 70,
+                "right": 30,
+                "top": 85 if title or len(series_specs) > 1 else 30,
+                "bottom": 70,
+            },
+            "xAxis": {
+                "type": "time",
+                "name": "Time",
+                "nameLocation": "middle",
+                "nameGap": 45,
+                "boundaryGap": (
+                    ["8%", "8%"] if any(item.kind == "bar" for item in series_specs) else False
+                ),
+                "axisLabel": {"hideOverlap": True},
+            },
+            "yAxis": {"type": "value", "name": y_axis_name},
+            "series": live_chart.option_series(),
+        }
+        option.update(extra_option or {})
+
+        self.chart(
+            id=id,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            option=option,
+            title=title,
+            page=page,
+            group=group,
+            card=card,
+            titlebar=title,
+        )
+        return live_chart
 
     def multi_axis_line_chart(
         self,
