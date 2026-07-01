@@ -657,6 +657,143 @@
       selectPage(pages[nextIndex]);
     }
 
+    function commandId(command, fallback = "default") {
+      return String(command.id ?? fallback);
+    }
+
+    function chartCommandId(command) {
+      return commandId(command, "chart");
+    }
+
+    function forgetBufferedCommands(buffer, predicate) {
+      let writeIndex = 0;
+      for (let readIndex = 0; readIndex < buffer.length; readIndex += 1) {
+        const command = buffer[readIndex];
+        if (!predicate(command)) {
+          buffer[writeIndex] = command;
+          writeIndex += 1;
+        }
+      }
+      buffer.length = writeIndex;
+    }
+
+    function forgetChartState(buffer, command) {
+      const id = chartCommandId(command);
+      const chartTypes = new Set([
+        "chart_define", "chart_create", "chart_option", "chart_set_option",
+        "chart_data", "chart_append", "chart_resize", "chart_move",
+        "chart_show", "chart_hide", "chart_remove", "chart_delete"
+      ]);
+      forgetBufferedCommands(buffer, (item) => chartCommandId(item) === id && chartTypes.has(item.type));
+    }
+
+    function forgetUiState(buffer, command) {
+      const defaults = {
+        ui_grid: "default",
+        ui_card: "card",
+        ui_control: "control",
+        ui_status: "status",
+        ui_table: "table"
+      };
+      const related = {
+        ui_grid: new Set(["ui_grid"]),
+        ui_card: new Set(["ui_card"]),
+        ui_control: new Set(["ui_control", "ui_control_update"]),
+        ui_status: new Set(["ui_status", "ui_status_update"]),
+        ui_table: new Set(["ui_table", "ui_table_update"])
+      };
+      const id = commandId(command, defaults[command.type] || "default");
+      const types = related[command.type] || new Set([command.type]);
+      forgetBufferedCommands(buffer, (item) =>
+        (commandId(item, id) === id && types.has(item.type)) ||
+        (command.type === "ui_card" && String(item.card || "") === id)
+      );
+    }
+
+    function forgetTerminalState(buffer, command) {
+      const id = commandId(command);
+      const types = command.type === "terminal_xterm_define"
+        ? new Set(["terminal_xterm_define", "terminal_xterm_output", "terminal_xterm_clear", "terminal_xterm_font_size"])
+        : new Set(["terminal_define", "terminal_write", "terminal_clear"]);
+      forgetBufferedCommands(buffer, (item) => commandId(item) === id && types.has(item.type));
+    }
+
+    function replacePreviousBufferedCommand(buffer, command, types, idForCommand, stopTypes = new Set()) {
+      const id = idForCommand(command);
+      for (let index = buffer.length - 1; index >= 0; index -= 1) {
+        const previous = buffer[index];
+        if (idForCommand(previous) !== id) continue;
+        if (stopTypes.has(previous.type)) break;
+        if (types.has(previous.type)) {
+          buffer[index] = command;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function coalescePatchUpdate(buffer, command, defineType, updateType, fallbackId) {
+      const id = commandId(command, fallbackId);
+      for (let index = buffer.length - 1; index >= 0; index -= 1) {
+        const previous = buffer[index];
+        if (commandId(previous, fallbackId) !== id) continue;
+        if (previous.type === defineType) {
+          buffer[index] = { ...previous, ...command, type: defineType, id };
+          return true;
+        }
+        if (previous.type === updateType) {
+          buffer[index] = { ...previous, ...command, type: updateType, id };
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function coalesceTableUpdate(buffer, command) {
+      const action = String(command.action || "set");
+      if (action === "set") {
+        return coalescePatchUpdate(buffer, command, "ui_table", "ui_table_update", "table");
+      }
+      if (action === "clear") {
+        return replacePreviousBufferedCommand(
+          buffer,
+          command,
+          new Set(["ui_table_update"]),
+          (item) => commandId(item, "table"),
+          new Set(["ui_table"])
+        );
+      }
+      return false;
+    }
+
+    function coalesceTerminalClear(buffer, command) {
+      const id = commandId(command);
+      const isXterm = command.type === "terminal_xterm_clear";
+      const removableTypes = isXterm
+        ? new Set(["terminal_xterm_output", "terminal_xterm_clear"])
+        : new Set(["terminal_write", "terminal_clear"]);
+      const defineType = isXterm ? "terminal_xterm_define" : "terminal_define";
+      let insertAt = buffer.length;
+      const kept = [];
+      let removed = false;
+
+      for (const item of buffer) {
+        const sameTarget = commandId(item) === id;
+        if (sameTarget && item.type === defineType) insertAt = kept.length + 1;
+        if (sameTarget && removableTypes.has(item.type)) {
+          removed = true;
+          continue;
+        }
+        kept.push(item);
+      }
+
+      if (!removed) return false;
+      insertAt = Math.min(insertAt, kept.length);
+      buffer.length = 0;
+      buffer.push(...kept.slice(0, insertAt), command, ...kept.slice(insertAt));
+      return true;
+    }
+
     function rememberCommand(command, pageKey = null) {
       const targetBuffer = getPageBuffer(pageKey);
       const targetIsVisible = isDisplayingPage(pageKey);
@@ -673,15 +810,17 @@
         }
       } else {
         let replaced = false;
-        if (command.type === "chart_option" && command.coalesce === true) {
+        if (command.type === "chart_define" || command.type === "chart_create") {
+          forgetChartState(targetBuffer, command);
+        } else if (command.type === "chart_option" && command.coalesce === true) {
           for (let index = targetBuffer.length - 1; index >= 0; index -= 1) {
             const previous = targetBuffer[index];
             if ((previous.type === "chart_define" || previous.type === "chart_create") &&
-                String(previous.id || "chart") === String(command.id || "chart")) {
+                chartCommandId(previous) === chartCommandId(command)) {
               break;
             }
             if (previous.type === "chart_option" && previous.coalesce === true &&
-                String(previous.id || "chart") === String(command.id || "chart")) {
+                chartCommandId(previous) === chartCommandId(command)) {
               targetBuffer[index] = command;
               replaced = true;
               break;
@@ -692,18 +831,49 @@
           for (let index = targetBuffer.length - 1; index >= 0; index -= 1) {
             const previous = targetBuffer[index];
             if ((previous.type === "chart_define" || previous.type === "chart_create") &&
-                String(previous.id || "chart") === String(command.id || "chart")) {
+                chartCommandId(previous) === chartCommandId(command)) {
               break;
             }
             const previousSeriesKey = previous.seriesId ?? previous.seriesName ?? Number(previous.seriesIndex ?? 0);
             if (previous.type === "chart_data" &&
-                String(previous.id || "chart") === String(command.id || "chart") &&
+                chartCommandId(previous) === chartCommandId(command) &&
                 previousSeriesKey === seriesKey) {
               targetBuffer[index] = command;
               replaced = true;
               break;
             }
           }
+        } else if (command.type === "chart_resize" || command.type === "chart_move") {
+          replaced = replacePreviousBufferedCommand(
+            targetBuffer,
+            command,
+            new Set(["chart_resize", "chart_move"]),
+            chartCommandId,
+            new Set(["chart_define", "chart_create"])
+          );
+        } else if (command.type === "chart_show" || command.type === "chart_hide") {
+          replaced = replacePreviousBufferedCommand(
+            targetBuffer,
+            command,
+            new Set(["chart_show", "chart_hide"]),
+            chartCommandId,
+            new Set(["chart_define", "chart_create"])
+          );
+        } else if (command.type === "chart_remove" || command.type === "chart_delete") {
+          forgetChartState(targetBuffer, command);
+          replaced = true;
+        } else if (["ui_grid", "ui_card", "ui_control", "ui_status", "ui_table"].includes(command.type)) {
+          forgetUiState(targetBuffer, command);
+        } else if (command.type === "ui_control_update") {
+          replaced = coalescePatchUpdate(targetBuffer, command, "ui_control", "ui_control_update", "control");
+        } else if (command.type === "ui_status_update") {
+          replaced = coalescePatchUpdate(targetBuffer, command, "ui_status", "ui_status_update", "status");
+        } else if (command.type === "ui_table_update") {
+          replaced = coalesceTableUpdate(targetBuffer, command);
+        } else if (command.type === "terminal_define" || command.type === "terminal_xterm_define") {
+          forgetTerminalState(targetBuffer, command);
+        } else if (command.type === "terminal_clear" || command.type === "terminal_xterm_clear") {
+          replaced = coalesceTerminalClear(targetBuffer, command);
         }
         if (!replaced) targetBuffer.push(command);
         if (pageKey === null && targetIsVisible) {

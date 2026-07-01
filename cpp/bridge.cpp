@@ -18,10 +18,12 @@
  */
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cctype>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -46,6 +48,7 @@ constexpr const char* DEFAULT_LISTEN_HOST = "0.0.0.0";
 constexpr int DEFAULT_WEBSOCKET_PORT = 8080;
 constexpr int DEFAULT_TCP_PORT = 9000;
 constexpr std::size_t DEFAULT_TCP_LIMIT = 16 * 1024 * 1024;
+constexpr std::size_t DEFAULT_REPLAY_LIMIT = 10000;
 constexpr auto WEBSOCKET_SEND_TIMEOUT = std::chrono::seconds(5);
 constexpr const char* WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -54,6 +57,8 @@ struct Args {
     int websocket_port = DEFAULT_WEBSOCKET_PORT;
     int tcp_port = DEFAULT_TCP_PORT;
     std::size_t tcp_limit = DEFAULT_TCP_LIMIT;
+    bool buffer_replay = true;
+    std::size_t buffer_limit = DEFAULT_REPLAY_LIMIT;
 };
 
 struct BrowserStatus {
@@ -89,6 +94,9 @@ struct TcpClient {
         << "  --websocket-port PORT   browser WebSocket port (default: 8080)\n"
         << "  --tcp-port PORT         drawing TCP port (default: 9000)\n"
         << "  --tcp-limit BYTES       maximum bytes per TCP JSON line (default: 16777216)\n"
+        << "  --buffer-replay         keep compact reconnect state for browsers (default)\n"
+        << "  --no-buffer-replay      disable reconnect state replay\n"
+        << "  --buffer-limit COUNT    maximum compact state commands retained, 0 disables the count limit (default: 10000)\n"
         << "  -h, --help              show this help\n";
     std::exit(exit_code);
 }
@@ -136,6 +144,12 @@ Args parse_args(int argc, char* argv[]) {
             args.tcp_port = parse_int(take_value(i, argc, argv, arg), arg);
         } else if (arg == "--tcp-limit") {
             args.tcp_limit = parse_size(take_value(i, argc, argv, arg), arg);
+        } else if (arg == "--buffer-replay") {
+            args.buffer_replay = true;
+        } else if (arg == "--no-buffer-replay") {
+            args.buffer_replay = false;
+        } else if (arg == "--buffer-limit") {
+            args.buffer_limit = parse_size(take_value(i, argc, argv, arg), arg);
         } else {
             throw std::runtime_error("unknown option: " + arg);
         }
@@ -572,6 +586,10 @@ public:
         std::cout << "WebSocket server listening on ws://" << args_.host << ":" << args_.websocket_port << "\n";
         std::cout << "TCP server listening on " << args_.host << ":" << args_.tcp_port
                   << " with " << args_.tcp_limit << " byte read limit\n";
+        std::cout << "Bridge reconnect state "
+                  << (args_.buffer_replay ? "enabled" : "disabled");
+        if (args_.buffer_replay) std::cout << " (" << args_.buffer_limit << " command limit)";
+        std::cout << "\n";
 
         while (true) {
             remove_stalled_web_clients();
@@ -631,6 +649,7 @@ private:
     int tcp_listen_fd_ = -1;
     std::map<int, WebClient> web_clients_;
     std::map<int, TcpClient> tcp_clients_;
+    std::vector<std::string> replay_buffer_;
 
     std::size_t web_client_count() const {
         std::size_t count = 0;
@@ -700,7 +719,6 @@ private:
             const bool connected = web_client_count() > 0;
             queue_tcp_json(client, "{\"status\":\"" + std::string(connected ? "connected" : "no_web_clients") +
                                    "\"," + browser_status_fields_json(web_clients_) + "}");
-            if (!connected) client.close_after_write = true;
             tcp_clients_[fd] = std::move(client);
         }
     }
@@ -742,6 +760,7 @@ private:
             client.output += response;
             client.handshaken = true;
             std::cout << "Web app connected\n";
+            replay_to_web_client(client);
             publish_tcp_event("{\"type\":\"__pallet_browser_connected\"," + browser_status_fields_json(web_clients_) + "}");
         }
 
@@ -835,20 +854,338 @@ private:
             return;
         }
 
+        remember_for_replay(line, type, is_object);
         const std::size_t connected_clients = web_client_count();
-        if (connected_clients == 0) {
-            queue_tcp_json(client, "{\"status\":\"no_web_clients\"}");
-            return;
-        }
-
         broadcast(line);
-        queue_tcp_json(client, "{\"status\":\"ok\",\"web_clients\":" + std::to_string(connected_clients) + "}");
+        queue_tcp_json(client, "{\"status\":\"ok\",\"web_clients\":" + std::to_string(connected_clients) +
+                              ",\"buffered\":" + std::string(args_.buffer_replay ? "true" : "false") + "}");
     }
 
     void broadcast(const std::string& command) {
         for (auto& item : web_clients_) {
             if (item.second.handshaken) queue_web_text(item.second, command);
         }
+    }
+
+    void replay_to_web_client(WebClient& client) {
+        if (!args_.buffer_replay || replay_buffer_.empty()) return;
+        for (const std::string& command : replay_buffer_) {
+            queue_web_text(client, command);
+        }
+    }
+
+    void remember_for_replay(const std::string& command, const std::string& type, bool is_object) {
+        if (!args_.buffer_replay) return;
+        static const std::set<std::string> ignored_types = {
+            "__pallet_get_status",
+            "__pallet_subscribe_events",
+            "__pallet_status",
+            "__pallet_terminal_input",
+            "__pallet_xterm_input",
+            "__pallet_xterm_resize",
+            "__pallet_ui_event",
+            "__pallet_chart_event",
+            "__pallet_script_loaded",
+            "__pallet_script_error",
+            "__pallet_client_disconnected",
+        };
+        if (!type.empty() && ignored_types.count(type)) return;
+
+        if (!is_object) {
+            replay_buffer_.push_back(command);
+            trim_replay_buffer();
+            return;
+        }
+
+        if (type == "clear") {
+            forget_page(command_page_key(command));
+            replay_buffer_.push_back(command);
+            trim_replay_buffer();
+            return;
+        }
+        if (type == "__pallet_delete_page" || type == "page_delete") {
+            forget_page(command_page_key(command));
+            trim_replay_buffer();
+            return;
+        }
+        if (type == "__pallet_show_page" || type == "page_show") {
+            replay_buffer_.erase(
+                std::remove_if(replay_buffer_.begin(), replay_buffer_.end(), [](const std::string& item) {
+                    const std::string item_type = extract_json_string(item, "type");
+                    return item_type == "__pallet_show_page" || item_type == "page_show";
+                }),
+                replay_buffer_.end());
+            replay_buffer_.push_back(command);
+            trim_replay_buffer();
+            return;
+        }
+        if (type == "__pallet_replace_group" || type == "group_replace") {
+            replace_group_state(command);
+            trim_replay_buffer();
+            return;
+        }
+        if (type == "chart_remove" || type == "chart_delete") {
+            forget_chart(command);
+            trim_replay_buffer();
+            return;
+        }
+        if (type == "chart_define" || type == "chart_create") {
+            forget_chart(command);
+            replay_buffer_.push_back(command);
+            trim_replay_buffer();
+            return;
+        }
+        if (type == "chart_option" && json_value_truthy(extract_json_value(command, "coalesce")) &&
+            replace_previous_chart_option(command)) {
+            return;
+        }
+        if (type == "chart_data" && !json_value_truthy(extract_json_value(command, "append")) &&
+            replace_previous_chart_data(command)) {
+            return;
+        }
+        if ((type == "chart_resize" || type == "chart_move") &&
+            replace_previous_target_command(command, {"chart_resize", "chart_move"}, "chart", {"chart_define", "chart_create"})) {
+            return;
+        }
+        if ((type == "chart_show" || type == "chart_hide") &&
+            replace_previous_target_command(command, {"chart_show", "chart_hide"}, "chart", {"chart_define", "chart_create"})) {
+            return;
+        }
+        if (is_ui_define_type(type)) {
+            forget_ui_target(command, type);
+            replay_buffer_.push_back(command);
+            trim_replay_buffer();
+            return;
+        }
+        if (type == "ui_control_update" &&
+            replace_previous_target_command(command, {"ui_control_update"}, "control", {"ui_control"})) {
+            return;
+        }
+        if (type == "ui_status_update" &&
+            replace_previous_target_command(command, {"ui_status_update"}, "status", {"ui_status"})) {
+            return;
+        }
+        if (type == "ui_table_update") {
+            const std::string action = extract_json_string(command, "action").empty()
+                ? "set"
+                : extract_json_string(command, "action");
+            if ((action == "set" || action == "clear") &&
+                replace_previous_target_command(command, {"ui_table_update"}, "table", {"ui_table"})) {
+                return;
+            }
+        }
+        if (type == "terminal_define" || type == "terminal_xterm_define") {
+            forget_terminal(command, type);
+            replay_buffer_.push_back(command);
+            trim_replay_buffer();
+            return;
+        }
+        if ((type == "terminal_clear" || type == "terminal_xterm_clear") && coalesce_terminal_clear(command, type)) {
+            return;
+        }
+
+        replay_buffer_.push_back(command);
+        trim_replay_buffer();
+    }
+
+    void trim_replay_buffer() {
+        if (args_.buffer_limit > 0 && replay_buffer_.size() > args_.buffer_limit) {
+            replay_buffer_.erase(
+                replay_buffer_.begin(),
+                replay_buffer_.begin() + static_cast<std::ptrdiff_t>(replay_buffer_.size() - args_.buffer_limit));
+        }
+    }
+
+    std::string command_page_key(const std::string& command) const {
+        std::string page = extract_json_value(command, "palletPage");
+        if (page == "null") page = extract_json_value(command, "page");
+        return page;
+    }
+
+    std::string command_chart_id(const std::string& command) const {
+        const std::string id = extract_json_string(command, "id");
+        return id.empty() ? "chart" : id;
+    }
+
+    std::string command_id(const std::string& command, const std::string& fallback = "default") const {
+        const std::string id = extract_json_string(command, "id");
+        return id.empty() ? fallback : id;
+    }
+
+    std::string command_series_key(const std::string& command) const {
+        const std::string series_id = extract_json_value(command, "seriesId");
+        const std::string series_name = extract_json_value(command, "seriesName");
+        const std::string series_index = extract_json_value(command, "seriesIndex");
+        return series_id + "|" + series_name + "|" + (series_index == "null" ? "0" : series_index);
+    }
+
+    bool same_chart(const std::string& first, const std::string& second) const {
+        return command_page_key(first) == command_page_key(second) &&
+               command_chart_id(first) == command_chart_id(second);
+    }
+
+    bool is_chart_command_type(const std::string& type) const {
+        return type == "chart_define" || type == "chart_create" ||
+               type == "chart_option" || type == "chart_set_option" ||
+               type == "chart_data" || type == "chart_append" ||
+               type == "chart_resize" || type == "chart_move" ||
+               type == "chart_show" || type == "chart_hide" ||
+               type == "chart_remove" || type == "chart_delete";
+    }
+
+    void forget_page(const std::string& page_key) {
+        replay_buffer_.erase(
+            std::remove_if(replay_buffer_.begin(), replay_buffer_.end(), [&](const std::string& item) {
+                return command_page_key(item) == page_key;
+            }),
+            replay_buffer_.end());
+    }
+
+    void forget_chart(const std::string& command) {
+        replay_buffer_.erase(
+            std::remove_if(replay_buffer_.begin(), replay_buffer_.end(), [&](const std::string& item) {
+                return same_chart(item, command) && is_chart_command_type(extract_json_string(item, "type"));
+            }),
+            replay_buffer_.end());
+    }
+
+    bool is_ui_define_type(const std::string& type) const {
+        return type == "ui_grid" || type == "ui_card" || type == "ui_control" ||
+               type == "ui_status" || type == "ui_table";
+    }
+
+    std::string default_ui_id(const std::string& type) const {
+        if (type == "ui_grid") return "default";
+        if (type == "ui_card") return "card";
+        if (type == "ui_control") return "control";
+        if (type == "ui_status") return "status";
+        if (type == "ui_table") return "table";
+        return "default";
+    }
+
+    bool is_related_ui_type(const std::string& define_type, const std::string& item_type) const {
+        if (define_type == "ui_grid") return item_type == "ui_grid";
+        if (define_type == "ui_card") return item_type == "ui_card";
+        if (define_type == "ui_control") return item_type == "ui_control" || item_type == "ui_control_update";
+        if (define_type == "ui_status") return item_type == "ui_status" || item_type == "ui_status_update";
+        if (define_type == "ui_table") return item_type == "ui_table" || item_type == "ui_table_update";
+        return item_type == define_type;
+    }
+
+    void forget_ui_target(const std::string& command, const std::string& type) {
+        const std::string page_key = command_page_key(command);
+        const std::string id = command_id(command, default_ui_id(type));
+        replay_buffer_.erase(
+            std::remove_if(replay_buffer_.begin(), replay_buffer_.end(), [&](const std::string& item) {
+                const std::string item_type = extract_json_string(item, "type");
+                return command_page_key(item) == page_key &&
+                       ((is_related_ui_type(type, item_type) && command_id(item, id) == id) ||
+                        (type == "ui_card" && extract_json_string(item, "card") == id));
+            }),
+            replay_buffer_.end());
+    }
+
+    void forget_terminal(const std::string& command, const std::string& type) {
+        const std::string page_key = command_page_key(command);
+        const std::string id = command_id(command);
+        replay_buffer_.erase(
+            std::remove_if(replay_buffer_.begin(), replay_buffer_.end(), [&](const std::string& item) {
+                const std::string item_type = extract_json_string(item, "type");
+                const bool related = type == "terminal_xterm_define"
+                    ? (item_type == "terminal_xterm_define" || item_type == "terminal_xterm_output" ||
+                       item_type == "terminal_xterm_clear" || item_type == "terminal_xterm_font_size")
+                    : (item_type == "terminal_define" || item_type == "terminal_write" || item_type == "terminal_clear");
+                return command_page_key(item) == page_key && command_id(item) == id && related;
+            }),
+            replay_buffer_.end());
+    }
+
+    void replace_group_state(const std::string& command) {
+        const std::string page_key = command_page_key(command);
+        const std::string group = extract_json_string(command, "group");
+        if (group.empty()) return;
+        replay_buffer_.erase(
+            std::remove_if(replay_buffer_.begin(), replay_buffer_.end(), [&](const std::string& item) {
+                return command_page_key(item) == page_key && extract_json_string(item, "group") == group;
+            }),
+            replay_buffer_.end());
+        replay_buffer_.push_back(command);
+    }
+
+    bool replace_previous_chart_option(const std::string& command) {
+        for (auto it = replay_buffer_.rbegin(); it != replay_buffer_.rend(); ++it) {
+            if (!same_chart(*it, command)) continue;
+            const std::string previous_type = extract_json_string(*it, "type");
+            if (previous_type == "chart_define" || previous_type == "chart_create") break;
+            if (previous_type == "chart_option" && json_value_truthy(extract_json_value(*it, "coalesce"))) {
+                *it = command;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool replace_previous_chart_data(const std::string& command) {
+        const std::string series_key = command_series_key(command);
+        for (auto it = replay_buffer_.rbegin(); it != replay_buffer_.rend(); ++it) {
+            if (!same_chart(*it, command)) continue;
+            const std::string previous_type = extract_json_string(*it, "type");
+            if (previous_type == "chart_define" || previous_type == "chart_create") break;
+            if (previous_type == "chart_data" && command_series_key(*it) == series_key) {
+                *it = command;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool replace_previous_target_command(
+        const std::string& command,
+        const std::set<std::string>& replace_types,
+        const std::string& default_id,
+        const std::set<std::string>& stop_types = {}) {
+        const std::string page_key = command_page_key(command);
+        const std::string id = command_id(command, default_id);
+        for (auto it = replay_buffer_.rbegin(); it != replay_buffer_.rend(); ++it) {
+            if (command_page_key(*it) != page_key || command_id(*it, default_id) != id) continue;
+            const std::string previous_type = extract_json_string(*it, "type");
+            if (stop_types.count(previous_type)) break;
+            if (replace_types.count(previous_type)) {
+                *it = command;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool coalesce_terminal_clear(const std::string& command, const std::string& type) {
+        const std::string page_key = command_page_key(command);
+        const std::string id = command_id(command);
+        const bool is_xterm = type == "terminal_xterm_clear";
+        const std::string define_type = is_xterm ? "terminal_xterm_define" : "terminal_define";
+        const std::set<std::string> removable_types = is_xterm
+            ? std::set<std::string>{"terminal_xterm_output", "terminal_xterm_clear"}
+            : std::set<std::string>{"terminal_write", "terminal_clear"};
+        std::vector<std::string> kept;
+        kept.reserve(replay_buffer_.size());
+        std::size_t insert_at = replay_buffer_.size();
+        bool removed = false;
+
+        for (const std::string& item : replay_buffer_) {
+            const bool same_target = command_page_key(item) == page_key && command_id(item) == id;
+            const std::string item_type = extract_json_string(item, "type");
+            if (same_target && item_type == define_type) insert_at = kept.size() + 1;
+            if (same_target && removable_types.count(item_type)) {
+                removed = true;
+                continue;
+            }
+            kept.push_back(item);
+        }
+        if (!removed) return false;
+        insert_at = std::min(insert_at, kept.size());
+        kept.insert(kept.begin() + static_cast<std::ptrdiff_t>(insert_at), command);
+        replay_buffer_.swap(kept);
+        return true;
     }
 
     void publish_tcp_event(const std::string& event_json) {

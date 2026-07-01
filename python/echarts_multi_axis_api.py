@@ -86,7 +86,8 @@ def builder_example(pallet: EChartsPallet):
         smooth=True,
     )
 
-    return chart.render()
+    chart.render()
+    return chart
 
 
 def main():
@@ -106,8 +107,8 @@ def main():
     pallet.start(timeout=args.timeout)
     pallet.clear(color="#0f172a", page=PAGE)
 
-    simple_2x2y_example(pallet)
-    builder_example(pallet)
+    simple_handle = simple_2x2y_example(pallet)
+    builder_chart = builder_example(pallet)
 
     pallet.gauge(
         id="cpu",
@@ -136,6 +137,55 @@ def main():
     try:
         i = 0
         while True:
+            simple_bottom_x = [f"{i + step}s" for step in range(6)]
+            simple_top_x = [i + step for step in range(6)]
+            simple_temperature = [
+                round(72.8 + math.sin((i + step) / 6) * 1.1, 2)
+                for step in range(6)
+            ]
+            simple_voltage = [
+                round(3.24 + math.cos((i + step) / 7) * 0.06, 3)
+                for step in range(6)
+            ]
+            simple_handle.set_option(
+                {
+                    "xAxis": [
+                        {"data": simple_bottom_x},
+                        {"data": simple_top_x},
+                    ],
+                    "series": [
+                        {"name": "Temperature", "data": simple_temperature},
+                        {"name": "Voltage", "data": simple_voltage},
+                    ],
+                },
+                coalesce=True,
+            )
+
+            builder_time = [f"{i + step}s" for step in range(5)]
+            builder_sample = [i + step for step in range(5)]
+            builder_temperature = [
+                round(72.5 + math.sin((i + step) / 5) * 1.4, 2)
+                for step in range(5)
+            ]
+            builder_voltage = [
+                round(3.24 + math.cos((i + step) / 6) * 0.05, 3)
+                for step in range(5)
+            ]
+            assert builder_chart.handle is not None
+            builder_chart.handle.set_option(
+                {
+                    "xAxis": [
+                        {"data": builder_time},
+                        {"data": builder_sample},
+                    ],
+                    "series": [
+                        {"name": "Temperature", "data": builder_temperature},
+                        {"name": "Voltage", "data": builder_voltage},
+                    ],
+                },
+                coalesce=True,
+            )
+
             value = 50 + 35 * math.sin(i / 10)
             pallet.update_gauge("cpu", round(value, 1), name="Load", page=PAGE)
             i += 1

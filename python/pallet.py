@@ -192,7 +192,7 @@ class Pallet:
 
         try:
             hello = self._read_response()
-            if hello.get("status") == "connected":
+            if hello.get("status") in {"connected", "no_web_clients"}:
                 # Consume the response to the status request after the modern
                 # bridge's unsolicited greeting, so it cannot be mistaken for
                 # the acknowledgement of the first drawing command.
@@ -206,9 +206,6 @@ class Pallet:
                 f"connected to {self.host}:{self.port}, but the service did not "
                 "complete the web pallet bridge handshake"
             ) from exc
-        if hello.get("status") == "no_web_clients":
-            self.close()
-            raise ConnectionError("bridge is running, but no browser pallet is connected")
         self._apply_browser_status(hello)
         return hello
 
@@ -314,6 +311,12 @@ class Pallet:
             yield captured
         finally:
             self._batch = None
+
+    @contextmanager
+    def coalesce_group(self, group: str):
+        with self.capture_commands() as commands:
+            yield commands
+        self.replace_group(group, commands)
 
     def replace_group(self, group: str, commands: Iterable[dict[str, Any]]) -> dict[str, Any]:
         return self.command({

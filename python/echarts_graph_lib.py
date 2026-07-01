@@ -163,15 +163,41 @@ class LineSeries:
 class ChartHandle:
     pallet: "EChartsPallet"
     id: str
+    page: Optional[str] = None
 
-    def set_option(self, option: JsonObject, *, merge: bool = True, lazy_update: bool = False) -> None:
-        self.pallet.set_option(self.id, option, merge=merge, lazy_update=lazy_update)
+    def set_option(
+        self,
+        option: JsonObject,
+        *,
+        merge: bool = True,
+        lazy_update: bool = False,
+        coalesce: bool = False,
+        page: Optional[str] = None,
+    ) -> None:
+        self.pallet.set_option(
+            self.id,
+            option,
+            merge=merge,
+            lazy_update=lazy_update,
+            coalesce=coalesce,
+            page=self.page if page is None else page,
+        )
 
-    def set_data(self, data: Any, *, series_index: int = 0) -> None:
-        self.pallet.set_data(self.id, data, series_index=series_index)
+    def set_data(self, data: Any, *, series_index: int = 0, page: Optional[str] = None) -> None:
+        self.pallet.set_data(
+            self.id,
+            data,
+            series_index=series_index,
+            page=self.page if page is None else page,
+        )
 
-    def append_data(self, data: Any, *, series_index: int = 0) -> None:
-        self.pallet.append_data(self.id, data, series_index=series_index)
+    def append_data(self, data: Any, *, series_index: int = 0, page: Optional[str] = None) -> None:
+        self.pallet.append_data(
+            self.id,
+            data,
+            series_index=series_index,
+            page=self.page if page is None else page,
+        )
 
     def resize(
         self,
@@ -180,11 +206,19 @@ class ChartHandle:
         y: Optional[int] = None,
         width: Optional[int] = None,
         height: Optional[int] = None,
+        page: Optional[str] = None,
     ) -> None:
-        self.pallet.resize_chart(self.id, x=x, y=y, width=width, height=height)
+        self.pallet.resize_chart(
+            self.id,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            page=self.page if page is None else page,
+        )
 
-    def remove(self) -> None:
-        self.pallet.remove_chart(self.id)
+    def remove(self, *, page: Optional[str] = None) -> None:
+        self.pallet.remove_chart(self.id, page=self.page if page is None else page)
 
 
 @dataclass(frozen=True)
@@ -486,21 +520,33 @@ class MultiAxisLineChart:
         )
         return self.handle
 
-    def update_line(self, name: str, data: Sequence[Any]) -> None:
+    def update_line(self, name: str, data: Sequence[Any], *, coalesce: bool = False) -> None:
         """Update one line by name after render()."""
         for idx, line in enumerate(self.lines):
             if line.name == name:
                 line.data = data
-                self.pallet.set_option(self.id, {"series": [{"name": name, "data": list(data)}]})
+                self.pallet.set_option(
+                    self.id,
+                    {"series": [{"name": name, "data": list(data)}]},
+                    coalesce=coalesce,
+                    page=self.page,
+                )
                 return
         raise KeyError(f"No line named {name!r}")
 
-    def update_x_axis(self, name: str, data: Sequence[Any]) -> None:
+    def update_x_axis(self, name: str, data: Sequence[Any], *, coalesce: bool = False) -> None:
         """Update category labels for one x axis by name."""
         for idx, axis in enumerate(self.x_axes):
             if axis.name == name:
                 axis.data = data
-                self.pallet.set_option(self.id, {"xAxis": [{"name": axis.label(), "data": list(data)}]})
+                x_axes = [{} for _ in self.x_axes]
+                x_axes[idx] = {"name": axis.label(), "data": list(data)}
+                self.pallet.set_option(
+                    self.id,
+                    {"xAxis": x_axes},
+                    coalesce=coalesce,
+                    page=self.page,
+                )
                 return
         raise KeyError(f"No x axis named {name!r}")
 
@@ -787,7 +833,7 @@ class EChartsPallet:
             "card": card,
         }))
 
-        return ChartHandle(self, id)
+        return ChartHandle(self, id, page)
 
     def set_option(
         self,
@@ -796,6 +842,7 @@ class EChartsPallet:
         *,
         merge: bool = True,
         lazy_update: bool = False,
+        coalesce: bool = False,
         page: Optional[str] = None,
     ) -> None:
         self.send(_clean_dict({
@@ -804,6 +851,7 @@ class EChartsPallet:
             "option": option,
             "merge": merge,
             "lazyUpdate": lazy_update,
+            "coalesce": coalesce,
             "page": page,
         }))
 

@@ -724,6 +724,7 @@ class Graph:
         margin_top: Optional[int] = None,
         margin_right: Optional[int] = None,
         graph_id: Optional[str] = None,
+        coalesce: bool = False,
     ) -> None:
         self._canvas = canvas
         self.title = title
@@ -746,6 +747,7 @@ class Graph:
         self._series: List[Series] = []
         self._annotations: List[Annotation] = []
         self.graph_id = graph_id or f"graph-{id(self):x}"
+        self.coalesce = coalesce
         self._last_ranges: Optional[Tuple[float, float, float, float, float, float]] = None
 
         graph_width = width if width is not None else canvas.width - x
@@ -1079,9 +1081,15 @@ class Graph:
         self._annotations.append(Annotation("point", x=self._datetime_value(x), y=y, text=text, color=color, fill=fill, size=size, y_axis=y_axis))
         return self
 
-    def draw(self) -> None:
+    def draw(self, *, coalesce: Optional[bool] = None) -> None:
         if not self._series:
             raise ValueError("No series added")
+
+        use_coalesce = self.coalesce if coalesce is None else coalesce
+        if use_coalesce and hasattr(self._canvas, "coalesce_group"):
+            with self._canvas.coalesce_group(self._graph_group()):
+                self._draw()
+            return
 
         batch_started = False
         if hasattr(self._canvas, "begin_batch") and hasattr(self._canvas, "end_batch"):
@@ -1216,6 +1224,9 @@ class Graph:
 
     def _series_group(self, index: int) -> str:
         return f"pallet-graph:{self.graph_id}:series:{index}"
+
+    def _graph_group(self) -> str:
+        return f"pallet-graph:{self.graph_id}:graph"
 
     def _series_index(self, series: int | str | Series) -> int:
         if isinstance(series, int):
@@ -1413,6 +1424,9 @@ class Graph:
     def _replace_series_or_redraw(self, index: int, redraw_axes: str | bool) -> None:
         if redraw_axes not in ("auto", True, False):
             raise ValueError("redraw_axes must be 'auto', True, or False")
+        if self.coalesce:
+            self.draw(coalesce=True)
+            return
         if redraw_axes is True or self._last_ranges is None:
             self.draw()
             return

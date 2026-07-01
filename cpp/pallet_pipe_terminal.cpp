@@ -240,12 +240,7 @@ public:
                                      std::to_string(port_) + ": " + std::strerror(last_errno));
         }
 
-        const std::string hello = read_line();
-        if (hello.find("\"status\":\"no_web_clients\"") != std::string::npos ||
-            hello.find("\"status\": \"no_web_clients\"") != std::string::npos) {
-            close();
-            throw std::runtime_error("bridge is running, but no browser pallet is connected");
-        }
+        read_line();
     }
 
     void define_terminal_region(const Args& args) {

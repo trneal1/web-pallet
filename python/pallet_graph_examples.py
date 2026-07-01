@@ -32,7 +32,12 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from pallet import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, Pallet
-from pallet_graph_lib import ArcGauge, BarGauge, CircularMeter, GaugeStyle, Graph, PolarChart
+from pallet_graph_lib import ArcGauge, BarGauge, CircularMeter, GaugeStyle, Graph as _Graph, PolarChart
+
+
+def Graph(*args, **kwargs):
+    kwargs.setdefault("coalesce", True)
+    return _Graph(*args, **kwargs)
 
 
 def print_pallet_size_info(pallet: Pallet) -> None:

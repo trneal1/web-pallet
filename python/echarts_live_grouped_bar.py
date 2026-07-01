@@ -434,6 +434,7 @@ def main() -> None:
                         {"name": "Memory %", "data": [item[2] for item in top_processes]},
                     ],
                 },
+                coalesce=True,
                 page=PAGE,
             )
     except KeyboardInterrupt:
