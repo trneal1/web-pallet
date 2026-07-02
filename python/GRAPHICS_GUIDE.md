@@ -637,6 +637,364 @@ Click column headers to sort. Filterable tables include a live search field.
 Selectable rows emit `row_click` events containing the row key and value.
 `max_rows` drops the oldest keyed rows as new rows arrive.
 
+## Apache ECharts in Web Pallet
+
+Web Pallet also supports Apache ECharts through `echarts_graph_lib.py`. Use this
+path when you want browser-native chart interaction, tooltips, legends, zooming,
+animated updates, and chart types that are easier to express with ECharts than
+with the canvas `Graph` class.
+
+ECharts support has three layers:
+
+- High-level helpers such as `line_chart()`, `bar_chart()`, `gauge()`,
+  `heatmap_chart()`, and `doughnut_chart()`.
+- Builder APIs such as `multi_axis_line_chart()` for structured charts with
+  named axes and line series.
+- The raw `chart()` escape hatch, which accepts a normal ECharts `option`
+  dictionary.
+
+### ECharts quick start
+
+Start the bridge and open `pallet.html` as usual:
+
+```powershell
+python python/bridge.py
+```
+
+Then run an ECharts script:
+
+```python
+from echarts_graph_lib import EChartsPallet
+
+pallet = EChartsPallet(host="127.0.0.1")
+try:
+    pallet.start()
+    pallet.clear(color="#0f172a", page="echarts")
+
+    pallet.line_chart(
+        id="temperature",
+        x=24,
+        y=24,
+        width=720,
+        height=360,
+        x_data=["08:00", "09:00", "10:00", "11:00", "12:00"],
+        y_data=[72.1, 72.8, 73.4, 73.0, 74.2],
+        title="Temperature",
+        series_names=["Sensor A"],
+        smooth=True,
+        y_axis_name="deg F",
+        x_axis_name="Time",
+        page="echarts",
+    )
+
+    pallet.show_page("echarts")
+    pallet.run_until_interrupted()
+finally:
+    pallet.stop()
+```
+
+Use `pallet.stop()` in a `finally` block for scripts that manage their own
+loops.
+
+### Raw ECharts options
+
+Use `chart()` when you already know the ECharts option shape or need a feature
+that is not wrapped by a helper. The `option` value is sent directly to
+`echarts.setOption()` in the browser.
+
+```python
+from echarts_graph_lib import EChartsPallet
+
+pallet = EChartsPallet()
+pallet.start()
+pallet.clear(page="raw")
+
+handle = pallet.chart(
+    id="raw-bars",
+    x=20,
+    y=20,
+    width=640,
+    height=360,
+    page="raw",
+    title="Raw option bar chart",
+    option={
+        "tooltip": {"trigger": "axis"},
+        "grid": {"left": 50, "right": 24, "top": 50, "bottom": 40},
+        "xAxis": {"type": "category", "data": ["A", "B", "C", "D"]},
+        "yAxis": {"type": "value"},
+        "series": [
+            {"name": "Count", "type": "bar", "data": [12, 19, 8, 15]},
+        ],
+    },
+)
+
+pallet.show_page("raw")
+```
+
+`chart()` returns a `ChartHandle`. You can update the chart through the handle
+or through the pallet:
+
+```python
+handle.set_option({"series": [{"name": "Count", "data": [14, 16, 11, 18]}]})
+pallet.set_option("raw-bars", {"title": {"text": "Updated title"}}, page="raw")
+```
+
+Useful `chart()` arguments:
+
+- `id`: unique chart id on the page.
+- `x`, `y`, `width`, `height`: chart rectangle in pallet pixels.
+- `option`: ECharts option dictionary.
+- `page`: optional named page.
+- `group`: command group for later replacement with `replace_group()`.
+- `card`: card id when placing a chart inside a Web Pallet UI card.
+- `theme`, `background`, `border`, `titlebar`: browser-side presentation
+  options around the chart host.
+
+### High-level helpers
+
+Helpers create common ECharts options without making you write the full JSON
+shape.
+
+```python
+pallet.line_chart(
+    id="line",
+    x=20,
+    y=20,
+    width=520,
+    height=300,
+    x_data=["Mon", "Tue", "Wed", "Thu", "Fri"],
+    y_data=[
+        [120, 132, 101, 134, 90],
+        [80, 92, 87, 110, 105],
+    ],
+    series_names=["Actual", "Target"],
+    title="Weekly output",
+    smooth=True,
+    area=False,
+)
+
+pallet.bar_chart(
+    id="bars",
+    x=560,
+    y=20,
+    width=420,
+    height=300,
+    categories=["CPU", "RAM", "Disk"],
+    values=[65, 72, 54],
+    title="Utilization",
+    horizontal=True,
+    series_name="Percent",
+)
+
+pallet.gauge(
+    id="load",
+    x=20,
+    y=350,
+    width=260,
+    height=260,
+    value=76,
+    title="CPU",
+    name="Load",
+    units="%",
+)
+```
+
+Common helper methods include:
+
+- `line_chart()`: one or more line series on a category x axis.
+- `bar_chart()`: vertical or horizontal bar chart.
+- `pie_chart()`, `doughnut_chart()`, `rose_pie_chart()`: pie-family charts.
+- `gauge()`, `progress_gauge()`, `multi_ring_gauge()`: gauge displays.
+- `stacked_line_chart()`, `area_line_chart()`, `stepped_line_chart()`: line
+  chart variants.
+- `bar_race_chart()`: animated sorted horizontal bars.
+- `bubble_scatter_chart()`: scatter points with `(x, y, size)` values.
+- `heatmap_chart()`: indexed x/y heatmap triples.
+- `radar_chart()`, `candlestick_chart()`, `funnel_chart()`,
+  `treemap_chart()`: specialty chart helpers.
+- `live_time_chart()`: rolling time-series chart for repeated appends.
+
+Most helpers accept `extra_option` or specialized `extra_series` arguments when
+you need to merge in raw ECharts fields.
+
+### Multi-axis builder
+
+Use `multi_axis_line_chart()` when a chart has multiple named axes or when you
+want to build the chart step by step. Axes and lines can be referenced by name
+instead of by ECharts index.
+
+```python
+chart = pallet.multi_axis_line_chart(
+    id="plant",
+    x=20,
+    y=20,
+    width=760,
+    height=420,
+    title="Plant telemetry",
+    data_zoom=True,
+    page="telemetry",
+)
+
+chart.add_x_axis("Time", data=["0s", "1s", "2s", "3s"], position="bottom")
+chart.add_x_axis("Sample", data=[0, 1, 2, 3], position="top")
+
+chart.add_y_axis("Temperature", units="deg F", position="left")
+chart.add_y_axis("Voltage", units="V", position="right")
+
+chart.add_line(
+    "Temperature",
+    [72.0, 72.5, 73.0, 72.8],
+    x_axis="Time",
+    y_axis="Temperature",
+    smooth=True,
+    area=True,
+)
+chart.add_line(
+    "Voltage",
+    [3.20, 3.24, 3.25, 3.22],
+    x_axis="Sample",
+    y_axis="Voltage",
+    smooth=True,
+)
+
+handle = chart.render()
+pallet.show_page("telemetry")
+```
+
+After rendering, update a named line or x axis through the builder:
+
+```python
+chart.update_x_axis("Time", ["4s", "5s", "6s", "7s"], coalesce=True)
+chart.update_line("Temperature", [72.9, 73.2, 73.6, 73.1], coalesce=True)
+```
+
+For the common two-X/two-Y case, use the compact helper:
+
+```python
+handle = pallet.line_chart_2x2y(
+    id="dual",
+    x=20,
+    y=20,
+    width=700,
+    height=420,
+    title="Two X / Two Y",
+    bottom_x=["0s", "1s", "2s"],
+    top_x=[0, 1, 2],
+    left_series=[72.0, 72.4, 72.9],
+    right_series=[3.20, 3.22, 3.25],
+    bottom_x_name="Time",
+    top_x_name="Sample",
+    left_y_name="Temperature",
+    left_y_units="deg F",
+    right_y_name="Voltage",
+    right_y_units="V",
+    data_zoom=True,
+)
+```
+
+### Live updates
+
+Every ECharts chart returns a `ChartHandle` with update helpers:
+
+```python
+handle.set_option(
+    {
+        "xAxis": {"data": ["1s", "2s", "3s", "4s"]},
+        "series": [{"name": "Sensor A", "data": [12, 14, 13, 16]}],
+    },
+    coalesce=True,
+)
+handle.set_data([{"value": 82, "name": "Load"}])
+handle.append_data([[5, 17]])
+handle.resize(width=800, height=420)
+handle.remove()
+```
+
+Use `coalesce=True` for high-frequency loops. The bridge remembers only the
+latest coalesced `chart_option` for that chart, which keeps reconnect replay
+compact and prevents stale intermediate frames from building up.
+
+For a rolling time chart, use `live_time_chart()` and append timestamped values:
+
+```python
+from datetime import datetime, timezone
+
+live = pallet.live_time_chart(
+    id="live",
+    x=20,
+    y=20,
+    width=720,
+    height=360,
+    title="Live sensors",
+    series={"Actual": "line", "Target": "bar"},
+    max_points=60,
+)
+
+live.append(
+    datetime.now(timezone.utc),
+    {"Actual": 42.5, "Target": 40.0},
+)
+```
+
+`LiveTimeChart.append()` coalesces its browser update automatically.
+
+### Cards, pages, and groups
+
+ECharts charts can be positioned directly with `x`, `y`, `width`, and `height`,
+or hosted inside Web Pallet cards.
+
+```python
+pallet.define_grid("dashboard", columns=2, gap=16, padding=16, page="dash")
+pallet.define_card("left", grid="dashboard", title="Production", page="dash")
+pallet.define_card("right", grid="dashboard", title="Quality", page="dash")
+
+pallet.line_chart(
+    id="production",
+    x=0,
+    y=0,
+    width=480,
+    height=300,
+    x_data=["A", "B", "C"],
+    y_data=[10, 14, 12],
+    card="left",
+    page="dash",
+)
+```
+
+Use `page` to isolate dashboards, `show_page(page)` to switch pages, and
+`group` with `replace_group()` when a whole dashboard region should be rebuilt
+as one unit.
+
+### Events
+
+Register `on_event()` when browser-side UI or pallet events should influence
+your ECharts updates. The ECharts pallet starts a second bridge connection for
+event polling.
+
+```python
+def handle_event(event):
+    if event.get("type") == "ui_event" and event.get("id") == "refresh":
+        pallet.set_option(
+            "production",
+            {"series": [{"data": [11, 13, 15]}]},
+            coalesce=True,
+        )
+
+pallet.on_event(handle_event)
+```
+
+### Run the included ECharts examples
+
+```powershell
+python python/echarts_examples.py
+python python/echarts_multi_axis_api.py
+python python/echarts_live_line_coalesce.py
+python python/echarts_live_grouped_bar.py
+```
+
+These examples show gallery-style helpers, the multi-axis builder, coalesced
+live updates, and a larger rolling dashboard.
+
 ## Common pitfalls
 
 - Call `draw()` after adding at least one series.
@@ -647,6 +1005,12 @@ Selectable rows emit `row_click` events containing the row key and value.
 - Keep confidence-band lower values at or below upper values.
 - Use `None` or `NaN` for intentional gaps, not an arbitrary string.
 - Use unique labels if series will be updated by name.
+- For ECharts, use unique chart ids per page.
+- Use `coalesce=True` for fast `set_option()` loops.
+- Make sure `pallet.html` can load ECharts from its configured CDN before
+  creating ECharts charts.
+- Prefer helpers and builders for common cases, then use `extra_option` or
+  raw `chart()` only for unsupported ECharts features.
 
 ## Compact API reference
 
@@ -679,3 +1043,42 @@ Selectable rows emit `row_click` events containing the row key and value.
 
 Series selectors may be an integer index, a unique label, or a `Series`
 instance.
+
+### ECharts helpers
+
+- `chart(id, x, y, width, height, option, ...)`
+- `line_chart(...)`
+- `bar_chart(...)`
+- `pie_chart(...)`
+- `gauge(...)`
+- `progress_gauge(...)`
+- `multi_ring_gauge(...)`
+- `stacked_line_chart(...)`
+- `area_line_chart(...)`
+- `stepped_line_chart(...)`
+- `bar_race_chart(...)`
+- `doughnut_chart(...)`
+- `rose_pie_chart(...)`
+- `bubble_scatter_chart(...)`
+- `heatmap_chart(...)`
+- `radar_chart(...)`
+- `candlestick_chart(...)`
+- `funnel_chart(...)`
+- `treemap_chart(...)`
+- `live_time_chart(...)`
+
+### ECharts builders and updates
+
+- `multi_axis_line_chart(...)`
+- `line_chart_2x2y(...)`
+- `ChartHandle.set_option(option, merge=True, lazy_update=False, coalesce=False)`
+- `ChartHandle.set_data(data, series_index=0)`
+- `ChartHandle.append_data(data, series_index=0)`
+- `ChartHandle.resize(x=None, y=None, width=None, height=None)`
+- `ChartHandle.remove()`
+- `MultiAxisLineChart.add_x_axis(...)`
+- `MultiAxisLineChart.add_y_axis(...)`
+- `MultiAxisLineChart.add_line(...)`
+- `MultiAxisLineChart.render()`
+- `MultiAxisLineChart.update_line(name, data, coalesce=False)`
+- `MultiAxisLineChart.update_x_axis(name, data, coalesce=False)`

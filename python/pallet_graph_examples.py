@@ -25,6 +25,7 @@ Then open ``pallet.html`` and connect it to ``ws://localhost:8080``. Finally:
 from __future__ import annotations
 
 import argparse
+import inspect
 import math
 import random
 import sys
@@ -35,9 +36,17 @@ from pallet import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, Pallet
 from pallet_graph_lib import ArcGauge, BarGauge, CircularMeter, GaugeStyle, Graph as _Graph, PolarChart
 
 
+_GRAPH_ACCEPTS_COALESCE = "coalesce" in inspect.signature(_Graph.__init__).parameters
+
+
 def Graph(*args, **kwargs):
-    kwargs.setdefault("coalesce", True)
-    return _Graph(*args, **kwargs)
+    use_coalesce = kwargs.pop("coalesce", True)
+    if _GRAPH_ACCEPTS_COALESCE:
+        kwargs["coalesce"] = use_coalesce
+    graph = _Graph(*args, **kwargs)
+    if use_coalesce and hasattr(graph, "coalesce"):
+        graph.coalesce = True
+    return graph
 
 
 def print_pallet_size_info(pallet: Pallet) -> None:

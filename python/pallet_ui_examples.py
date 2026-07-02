@@ -52,7 +52,7 @@ def main() -> int:
             height=320,
         )
 
-        state = {"next_id": 1, "name": "sensor-a", "level": 50, "count": 0}
+        state = {"next_id": 1, "name": "sensor-a", "level": 50, "count": 0, "rows": []}
 
         def handle_event(event: dict) -> None:
             control_id = event.get("id")
@@ -72,12 +72,15 @@ def main() -> int:
                 activity.set("Updating", active=True)
                 row_id = state["next_id"]
                 state["next_id"] += 1
-                table.upsert({
+                row = {
                     "id": row_id,
                     "sensor": state["name"],
                     "value": state["level"],
                     "time": time.strftime("%H:%M:%S"),
-                })
+                }
+                state["rows"].append(row)
+                state["rows"] = state["rows"][-100:]
+                table.set(state["rows"])
                 state["count"] += 1
                 count.set(state["count"])
                 activity.set("Idle", active=False)
